@@ -1,0 +1,116 @@
+BROKER SCHEMA diners.utilitarios.genericos
+
+/*
+ * Método utilizado para setear la configuración enviada por el Environment a la configuración del ISeries y el mensaje de entrada
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 05 Abril 2017
+ *
+ */
+CREATE COMPUTE MODULE LlamarAS400_ProcesarEntrada
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+		SET Environment.FlujosAs400.Salida = NULL;
+		
+		DECLARE nomAS400 CHARACTER Environment.FlujosAs400.Programa;
+		
+		-- Verificamos si existe id de timeOut en folder BDD
+		IF FIELDTYPE(Environment.FlujosAs400.idTimeOut) IS NOT NULL THEN
+			-- Verificamos si existe timeOut en cache
+			IF FIELDTYPE(Environment.cache.TimeOut.{Environment.FlujosAs400.idTimeOut}) IS NOT NULL THEN
+				SET Environment.FlujosAs400.Timeout = Environment.cache.TimeOut.{Environment.FlujosAs400.idTimeOut};
+			END IF;
+		END IF;
+		
+		SET InputLocalEnvironment.ISeriesPcmlCall.configurableService = Environment.FlujosAs400.ServiceConfigurable;
+		SET InputLocalEnvironment.ISeriesPcmlCall.isXPcml 			  = Environment.FlujosAs400.ISXPCML;
+		SET InputLocalEnvironment.ISeriesPcmlCall.pcmlCall 			  = Environment.FlujosAs400.Programa;
+		SET InputLocalEnvironment.ISeriesPcmlCall.libraryList 		  = Environment.FlujosAs400.Library;
+		
+		
+		/*Método para imprimir logs*/
+		DECLARE referencia REFERENCE TO Environment;
+		CALL diners.logs.ImprimirLogs(InputRoot.XMLNSC.xpcml, 'AS400_' || nomAS400, 'E', referencia);
+	
+		RETURN TRUE;
+	END;
+
+END MODULE;
+
+/*
+ * En caso de ocurrir una excepción se contruye un árbol de salida con un código y descripción
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 05 Abril 2017
+ *
+ */
+CREATE COMPUTE MODULE LlamarAS400_ProcesarError
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+		SET OutputRoot.Properties = InputRoot.Properties;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+		
+		DECLARE codError INTEGER;
+		DECLARE descError CHARACTER;
+			
+		-- Revisar si existe mensajes en la lista de excepciones.
+		IF CARDINALITY(InputExceptionList.*[]) > 0 THEN
+			SET codError = 0;
+			SET descError = '';
+			DECLARE ListaExcepciones REFERENCE TO InputExceptionList;
+	
+			CALL obtenerException(ListaExcepciones, codError, descError);
+			
+			SET Environment.FlujosAs400.Salida.codError = '997';
+			SET Environment.FlujosAs400.Salida.descError = 'AS400: ESB-' || CAST(codError AS CHARACTER) || ' - ' || descError;
+		ELSE
+			-- Procesar Error
+			SET Environment.FlujosAs400.Salida.codError = '999';
+			SET Environment.FlujosAs400.Salida.descError = 'AS400: Error al invocar el servicio del AS400.';
+		END IF;
+		
+		/*Método para imprimir logs*/
+		DECLARE referencia REFERENCE TO Environment;
+		CALL diners.logs.ImprimirLogs(Environment.FlujosAs400.Salida, 'AS400_' || Environment.FlujosAs400.Programa, 'S', referencia);
+	
+		RETURN TRUE;
+	END;
+
+END MODULE;
+
+/*
+ * En caso exitoso se obtiene la respuesta del AS400 y se la asigna al Environment posteriormente se elimina el contenido del OUTPUT.XMLNCS y 
+ * el árbol de entrada del AS400
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 05 Abril 2017
+ *
+ */
+CREATE COMPUTE MODULE LlamarAS400_ProcesarSalida
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+		
+		-- Copiar respuesta
+		CREATE LASTCHILD OF Environment.FlujosAs400 DOMAIN('XMLNSC') TYPE XMLNSC.Folder NAME 'Salida';
+		SET Environment.FlujosAs400.Salida = OutputRoot.XMLNSC;
+		
+		/*Método para imprimir logs*/
+		DECLARE referencia REFERENCE TO Environment;
+		CALL diners.logs.ImprimirLogs(Environment.FlujosAs400.Salida, 'AS400_' || Environment.FlujosAs400.Programa, 'S', referencia);
+		
+		SET Environment.FlujosAs400.Salida.codError = '0';
+		SET Environment.FlujosAs400.Salida.descError = 'OK';
+		
+		-- Borrar Data
+		SET OutputRoot.XMLNSC = NULL;
+		SET Environment.FlujosAs400.Entrada = NULL;
+		
+		RETURN TRUE;
+	END;
+
+END MODULE;

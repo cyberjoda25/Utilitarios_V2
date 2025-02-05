@@ -1,0 +1,158 @@
+BROKER SCHEMA diners.logs
+
+CREATE COMPUTE MODULE IniciarLogsMQ
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+		DECLARE nomCola CHARACTER;
+		
+		--Obtener el nombre del servicio y establecer el tipo de servicio
+		SET nomCola = OutputRoot.MQMD.SourceQueue;
+		SET Environment.DatosServicio.tipoServicio = 'MQ';
+		SET Environment.DatosServicio = OutputRoot.XMLNSC.[<].DatosServicio;
+		
+		CREATE LASTCHILD OF Environment.Logs.EntradaSoap NAME 'entrada';
+
+		IF FIELDTYPE(InputRoot.XMLNSC.MQ.Header) IS NOT NULL THEN
+			CREATE LASTCHILD OF Environment.Logs.EntradaSoap.entrada NAME FIELDNAME(InputRoot.XMLNSC.MQ.Header);
+			DECLARE datosArbol REFERENCE TO Environment.Logs.EntradaSoap.entrada.[<];
+			DECLARE element1 REFERENCE TO InputRoot.XMLNSC.MQ.Header;
+			CALL crearArbol(element1, datosArbol);
+			
+			SET Environment.Header = InputRoot.XMLNSC.MQ.Header;
+			--SET Environment.Header.dinHeader.uuid = Environment.DatosServicio.uuidWS || 'MQ';
+		END IF;
+
+		IF FIELDTYPE(InputRoot.XMLNSC.MQ.Body) IS NOT NULL THEN
+			CREATE LASTCHILD OF Environment.Logs.EntradaSoap.entrada NAME FIELDNAME(InputRoot.XMLNSC.MQ.Body);
+			DECLARE datosArbol2 REFERENCE TO Environment.Logs.EntradaSoap.entrada.[<];
+			DECLARE element2 REFERENCE TO InputRoot.XMLNSC.MQ.Body;
+			CALL crearArbol(element2, datosArbol2);
+		END IF;
+
+		CREATE LASTCHILD OF Environment.Logs NAME 'SalidaSoap';
+
+		SET Environment.DatosServicio.fechaPeticion = diners.utilitarios.obtenerFecha();
+
+		RETURN TRUE;
+	END;
+END MODULE;
+
+
+CREATE COMPUTE MODULE FinalizarLogsMQ
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+
+		DECLARE nombServicio,nombOperacion,port,ip_Server,Cola,GestorColas CHARACTER;
+		DECLARE imprimirLogs CHARACTER;
+
+		SET nombServicio = Environment.DatosServicio.nombreServicio;
+		SET nombOperacion = Environment.DatosServicio.operacion;
+		SET ip_Server = Environment.DatosServicio.ipHost;
+		SET port = Environment.DatosServicio.portHost;
+		--Obtener informacion de la base de datos parametros generales sobre el QUEUE
+		CALL getParamConfig(nombServicio,nombOperacion,imprimirLogs);
+
+		IF InputLocalEnvironment.Variables.BDLOGCONFIG.imprimirLogToFileBD <> '0' THEN
+			IF nombServicio IS NULL THEN
+				SET nombServicio = 'Error_Service';
+			END IF;
+
+			IF nombOperacion IS NULL THEN
+				SET nombOperacion = Environment.operacion;
+			END IF;
+
+			IF nombOperacion IS NULL THEN
+				SET nombOperacion = 'Error_Operacion';
+			END IF;
+
+			IF port IS NULL THEN
+				IF FIELDTYPE(OutputRoot.HTTPInputHeader) IS NOT NULL THEN
+					SET port = OutputRoot.HTTPInputHeader."X-Server-Port";
+				ELSE
+					SET port = '7800';
+				END IF;
+			END IF;
+			
+			--Crear la carpeta para la salida del Soap copiando el header y body del mensaje
+			CREATE LASTCHILD OF Environment.Logs.SalidaSoap NAME 'salida';
+			CREATE LASTCHILD OF Environment.Logs.SalidaSoap.salida.Body NAME nombOperacion || 'Response';
+			SET Environment.Logs.SalidaSoap.salida.Body.[<].dinBody.codError = '0';
+			SET Environment.Logs.SalidaSoap.salida.Body.[<].dinBody.descError = 'OK';
+			--Crear una carpeta con el nombre del servicio
+			CREATE LASTCHILD OF OutputLocalEnvironment.blob.Envelope DOMAIN('XMLNSC') NAME 'tramaLogs';
+			--Colocar la trama de configuracion al arbol
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.ipHost = ip_Server;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.portHost = port;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.nombreServicio = nombServicio;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.operacion = nombOperacion;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.fechaIni = Environment.DatosServicio.fechaPeticion;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.fechaFin = diners.utilitarios.obtenerFecha();
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.ConfigBD.flagImprimirLogToFileBD =InputLocalEnvironment.Variables.BDLOGCONFIG.imprimirLogToFileBD;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.ConfigBD.descError=InputLocalEnvironment.Variables.BDLOGCONFIG.descError;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.ConfigBD.descExitoso=InputLocalEnvironment.Variables.BDLOGCONFIG.descExitoso;
+			--Colocar la trama de entrada, salida y proveedores al arbol
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Entrada = Environment.Logs.EntradaSoap.[<];
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Proveedor = Environment.Logs.Proveedor;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Salida = Environment.Logs.SalidaSoap.[<];
+
+			DECLARE bodyIn REFERENCE TO OutputLocalEnvironment.blob.Envelope;
+
+			SET Environment.Variables.Envelope = bodyIn;
+			SET Environment.Variables.BLOB = ASBITSTREAM(Environment.Variables.Envelope OPTIONS FolderBitStream CCSID 1208);
+			
+			--Utilizar la conversion con pagina de codigo 1208, 819
+			DECLARE requestChar CHAR CAST(Environment.Variables.BLOB AS CHARACTER CCSID 819);		
+			--Enviar a guardar el mensaje en la cola
+			IF InputLocalEnvironment.Variables.BDLOGCONFIG.nomGestorColas <> '' OR InputLocalEnvironment.Variables.BDLOGCONFIG.nomGestorColas <> NULL OR
+				InputLocalEnvironment.Variables.BDLOGCONFIG.nomCola <> '' OR InputLocalEnvironment.Variables.BDLOGCONFIG.nomCola <> NULL THEN
+				DECLARE codError CHARACTER;
+				DECLARE referencia REFERENCE TO InputLocalEnvironment.Variables.BDLOGCONFIG;
+				
+				SET codError = DepositarMensajeACola(requestChar, referencia);
+			END IF;
+		END IF;
+		
+		-- Borrar los datos
+		SET Environment.blob = NULL;
+		SET Environment.Variables = NULL;
+
+		RETURN TRUE;
+	END;
+
+	CREATE PROCEDURE getParamConfig(IN nomServicio CHARACTER, IN nomOperacion CHARACTER, OUT imprimirLogs CHARACTER)
+	BEGIN
+		-- Traer parametros de conexion a Queue Manager desde archivo
+		DECLARE logsParametros REFERENCE TO OutputLocalEnvironment;
+		CAll cargarConfiguracionLogParametros (logsParametros);
+
+		CREATE LASTCHILD OF InputLocalEnvironment.Variables DOMAIN('XMLNSC') NAME 'BDLOGCONFIG';
+		SET InputLocalEnvironment.Variables.BDLOGCONFIG.nomServicio = nomServicio || '/' || nomOperacion;
+
+		FOR source AS OutputLocalEnvironment.BDLOGCONFIG.respuesta[] DO
+			IF source.PROPIEDAD = 'NAMEQMANAGER' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.nomGestorColas = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'QUEUE_LOGS' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.nomCola = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'SERVIDOR_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.servidorMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'CANAL_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.canalMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'PUERTO_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.portMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'USER_ID_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.userIdMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'PASSWORD_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.passMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'IMPRIMIR_FILE_BD' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.imprimirLogToFileBD = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'DESC_ERROR' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.descError = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'DESC_EXITOSO' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.descExitoso = TRIM(source.VALOR);
+			END IF;
+		END FOR;
+	END;
+END MODULE;

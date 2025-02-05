@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<scm:sourceControlLoadRule xmlns:scm="http://com.ibm.team.scm" eclipseProjectOptions="create" version="1">
+	<itemLoadRule alternateName="Utilitarios_V2">
+        <component name="Utilitarios_V2"/>
+        <item repositoryPath="/"/>
+    </itemLoadRule>
+    <itemLoadRule alternateName="MulticanalidadUtilitarios">
+        <component name="MulticanalidadUtilitarios"/>
+        <item repositoryPath="/"/>
+    </itemLoadRule>
+</scm:sourceControlLoadRule>

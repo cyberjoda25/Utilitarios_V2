@@ -1,0 +1,64 @@
+BROKER SCHEMA diners.utilitarios
+
+--Este método corrige los caractéres especiales de cualquier cadena que viene al bróker.
+--La manera de invocar este procedimiento es la siguiente:
+--diners.utilitarios.conversion(TEXTO, Environment.variables); 
+--El método posee 2 parámetros, el primero es la cadena a corregir, el segundo es un parámetro de referencia que sirve para crear las variables 
+--	necesarias para la conversion
+CREATE PROCEDURE conversion (IN texto CHARACTER, IN Env REFERENCE) RETURNS CHAR  BEGIN
+	IF texto <> '' OR texto IS NOT NULL THEN
+		CREATE LASTCHILD OF Env.Variables DOMAIN('XMLNSC') NAME 'salidaRespuesta';
+		DECLARE salidaRespuesta REFERENCE TO Env.Variables.BitStream;
+		
+		SET Env.Variables.salidaRespuesta.Body = CAST(texto AS character CCSID 1208 Encoding 546);
+		SET Env.Variables.BLOB = ASBITSTREAM(Env.Variables.salidaRespuesta.Body OPTIONS FolderBitStream);
+	    DECLARE requestChar CHAR CAST(Env.Variables.BLOB AS CHARACTER CCSID 1208);
+	    
+	    SET requestChar = REPLACE(requestChar, '<Body>', '');
+	    SET requestChar = REPLACE(requestChar, '</Body>', '');
+	    SET requestChar = TRIM(requestChar);
+	    
+	    DELETE FIELD Env.Variables;
+
+		RETURN requestChar; 
+	ELSE
+		RETURN '';
+	END IF;
+END;
+
+
+/*
+ * Recibe el header de T24, obtiene los valores de total pagina y total registros ydevuelve el valor de paginado para TCH
+ *
+ * Parameters:
+ * 
+ *
+ */
+CREATE PROCEDURE getTotalPage(INOUT rootHeader REFERENCE) RETURNS INT
+	BEGIN
+		DECLARE numTotalRegistro DECIMAL 0;
+		DECLARE numTotalPagina DECIMAL 0;
+		DECLARE numTotalResuelta DECIMAL 0;
+		DECLARE valorRespuesta INT 0;
+		
+		SET numTotalRegistro = rootHeader.total_size;
+		SET numTotalPagina = rootHeader.page_size;
+		
+		SET numTotalResuelta = numTotalRegistro / numTotalPagina; 
+		SET valorRespuesta = ROUND(numTotalResuelta, 0 MODE ROUND_UP);
+		
+		RETURN valorRespuesta;
+	END;
+	
+
+/*
+ * Obtiene la fecha y hora actual del sistema mediante java
+ *
+ * Parameters:
+ * 
+ *
+ */
+CREATE FUNCTION obtenerFecha () 
+	RETURNS CHAR
+	LANGUAGE JAVA 
+	EXTERNAL NAME "ec.com.diners.util.StringUtils.getFechaActual";

@@ -1,0 +1,177 @@
+BROKER SCHEMA diners.utilitarios.genericos
+
+CREATE COMPUTE MODULE LlamarAs400V_ProcesarEntrada
+	/*
+	* Método global, crea un árbol con los datos de un servicio configurable
+	* y lo guarda en el Environment.
+	*
+	* Parameters:
+	*
+	* IN nombreServicio CHARACTER: Nombre del servicio configurable que se
+	* va a cargar.
+	* INOUT obj REFERENCE: Referencia a un árbol donde se colocarán
+	* los parámetros cargados.
+	*/
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+		DECLARE urlConector CHARACTER '';
+		SET Environment.FlujosAs400.Salida = NULL;
+		
+		-- Se verifica si hay valor en el timeOut
+		IF Environment.FlujosAs400.Timeout IS NOT NULL THEN
+			DECLARE timeOut INTEGER CAST(Environment.FlujosAs400.Timeout AS INTEGER);
+			IF timeOut < 30 THEN
+				SET timeOut = timeOut * 1000;
+				SET OutputLocalEnvironment.Destination.HTTP.TimeoutMillis = timeOut;
+			END IF;
+		END IF;
+		SET OutputLocalEnvironment.Destination.MQ.DestinationData[1].queueName = Environment.FlujosAs400.Queue;
+		IF FIELDTYPE(OutputRoot.XMLNSC.InputAs400) IS NOT NULL THEN
+			SET OutputRoot.XMLNSC.InputAs400.Conexion.hostname = Environment.FlujosAs400.ServiceConfigurable;
+			SET OutputRoot.XMLNSC.InputAs400.Conexion.programa = Environment.FlujosAs400.Programa;
+			SET OutputRoot.XMLNSC.InputAs400.Conexion.libraryList = Environment.FlujosAs400.Library;
+			SET OutputRoot.XMLNSC.InputAs400.Conexion.rutaPath = Environment.FlujosAs400.Path;
+			
+			/*Método para imprimir logs*/
+			DECLARE referencia REFERENCE TO Environment;
+			CALL diners.logs.ImprimirLogs(OutputRoot.XMLNSC.InputAs400, 'AS400_' || Environment.FlujosAs400.Programa, 'E', referencia);
+			
+			SET Environment.Variables.ruteoAs = 'HTTP';
+		ELSE
+			DECLARE soapMessageIn REFERENCE TO OutputRoot.JSON.Data.MessageIn;
+			IF NOT EXISTS(Environment.ConectorURL[]) THEN
+				 CREATE LASTCHILD OF Environment NAME 'ConectorURL';
+			END IF;
+			DECLARE obj REFERENCE TO Environment.ConectorURL;
+			CREATE LASTCHILD OF OutputRoot.JSON.Data AS soapMessageIn NAME 'MessageIn';
+			
+			DECLARE datosServicio REFERENCE TO Environment.DatosServicio;
+			SET obj.ServicioInfo.nombreServicio = datosServicio.nombreServicio;
+			SET obj.ServicioInfo.operacion = datosServicio.operacion;
+			SET obj.ServicioInfo.puerto = datosServicio.portHost;
+			SET obj.ServicioInfo.uuid = datosServicio.uuidWS;
+				
+			CALL diners.utilitarios.leerConectorDestino( 'ConectorDestino', ExecutionGroupLabel) INTO urlConector;
+			DELETE FIELD obj.ServicioInfo;
+			
+			DECLARE soapInHeader REFERENCE TO soapMessageIn;
+			CREATE LASTCHILD OF soapMessageIn AS soapInHeader NAME 'header';
+			SET soapInHeader.hostname = Environment.FlujosAs400.ServiceConfigurable;
+			SET soapInHeader.moduloRPG = Environment.FlujosAs400.moduloRPG;
+			SET soapInHeader.programa = Environment.FlujosAs400.Programa;
+			SET soapInHeader.nomProcedimiento = Environment.FlujosAs400.nomProcedimiento;
+			SET soapInHeader.libraryList = Environment.FlujosAs400.Library;
+			SET soapInHeader.rutaPath = Environment.FlujosAs400.Path;
+			SET soapInHeader.comandoRPG = Environment.FlujosAs400.comandoRPG;
+			SET soapInHeader.longitudSalida = Environment.FlujosAs400.longitudSalida;
+			SET soapInHeader.entrada = Environment.FlujosAs400.entrada;
+			SET soapInHeader.salida = Environment.FlujosAs400.salida;
+			SET soapInHeader.longitudPrograma = Environment.FlujosAs400.longitudPrograma; 
+			DECLARE soapInBody REFERENCE TO soapMessageIn;
+			CREATE LASTCHILD OF soapMessageIn AS soapInBody NAME 'body';
+			
+			CREATE LASTCHILD OF soapInBody NAME UCASE(Environment.FlujosAs400.Programa);
+			
+			SET soapInBody = Environment.FlujosAs400.Entrada;
+			
+			/*Método para imprimir logs*/
+			DECLARE referencia REFERENCE TO Environment;
+			CALL diners.logs.ImprimirLogs(OutputRoot.JSON.Data, 'AS400_' || Environment.FlujosAs400.Programa, 'E', referencia);
+			
+			SET Environment.Variables.ruteoAs = 'JSON';
+			-- SET OutputLocalEnvironment.Destination.HTTP.RequestURL = obj.{ExecutionGroupLabel};
+			SET OutputLocalEnvironment.Destination.HTTP.RequestURL = urlConector;
+		END IF;
+		
+		RETURN TRUE;
+	END;
+END MODULE;
+
+CREATE COMPUTE MODULE LlamarAs400V_ProcesarSalida
+	/*
+	* Método global, crea un árbol con los datos de un servicio configurable
+	* y lo guarda en el Environment.
+	*
+	* Parameters:
+	*
+	* IN nombreServicio CHARACTER: Nombre del servicio configurable que se
+	* va a cargar.
+	* INOUT obj REFERENCE: Referencia a un árbol donde se colocarán
+	* los parámetros cargados.
+	*/
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		DECLARE espacio CHAR CAST(X'0A' AS CHAR CCSID 1208);
+		DECLARE referencia REFERENCE TO Environment;
+		
+		IF Environment.Variables.ruteoAs = 'HTTP' THEN
+			DECLARE responseAs400 REFERENCE TO InputRoot.XMLNSC.MessageOut;
+		
+			IF responseAs400.codError = '0' THEN
+				CREATE LASTCHILD OF Environment.FlujosAs400.Salida NAME FIELDNAME(responseAs400.xpcml.[ < ]);
+				SET Environment.FlujosAs400.Salida.[ < ] = responseAs400.xpcml.[ < ];
+			END IF;
+			
+			SET Environment.FlujosAs400.Salida.codError = responseAs400.codError;
+			SET Environment.FlujosAs400.Salida.descError = REPLACE(responseAs400.descError, espacio, '&#10;');
+			
+			/*Método para imprimir logs*/
+			CALL diners.logs.ImprimirLogs(responseAs400, 'AS400_' || Environment.FlujosAs400.Programa, 'S', referencia);
+		ELSE
+			DECLARE responseAs400 REFERENCE TO InputRoot.JSON.Data;
+			CREATE LASTCHILD OF Environment.FlujosAs400.Salida NAME FIELDNAME(responseAs400.[ > ]);
+			SET Environment.FlujosAs400.Salida = responseAs400;
+			/*Método para imprimir logs*/
+			CALL diners.logs.ImprimirLogs(responseAs400, 'AS400_' || Environment.FlujosAs400.Programa, 'S', referencia);
+			
+		END IF;
+		
+		RETURN TRUE;
+	END;
+END MODULE;
+
+CREATE COMPUTE MODULE LlamarAs400V_ProcesarError
+	/*
+	* Método global, crea un árbol con los datos de un servicio configurable
+	* y lo guarda en el Environment.
+	*
+	* Parameters:
+	*
+	* IN nombreServicio CHARACTER: Nombre del servicio configurable que se
+	* va a cargar.
+	* INOUT obj REFERENCE: Referencia a un árbol donde se colocarán
+	* los parámetros cargados.
+	*/
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+		SET OutputRoot.Properties = InputRoot.Properties;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+		
+		DECLARE codError INTEGER 0;
+		DECLARE descError CHARACTER '';
+			
+		-- Revisar si existe mensajes en la lista de excepciones.
+		IF CARDINALITY(InputExceptionList.*[]) > 0 THEN
+			SET codError = 0;
+			SET descError = '';
+			DECLARE ListaExcepciones REFERENCE TO InputExceptionList;
+	
+			CALL obtenerException(ListaExcepciones, codError, descError);
+			
+			SET Environment.FlujosAs400.Salida.codError = '997';
+			SET Environment.FlujosAs400.Salida.descError = 'AS400: ESB-' || CAST(codError AS CHARACTER) || ' - ' || descError;
+		ELSE
+			-- Procesar Error
+			SET Environment.FlujosAs400.Salida.codError = '999';
+			SET Environment.FlujosAs400.Salida.descError = 'AS400: Error al invocar el servicio del AS400.';
+		END IF;
+		
+		/*Método para imprimir logs*/
+		DECLARE referencia REFERENCE TO Environment;
+		CALL diners.logs.ImprimirLogs(Environment.FlujosAs400.Salida, 'AS400_' || Environment.FlujosAs400.Programa, 'S', referencia);
+	
+		RETURN TRUE;
+	END;
+END MODULE;

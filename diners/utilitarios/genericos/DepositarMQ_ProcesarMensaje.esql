@@ -1,0 +1,125 @@
+BROKER SCHEMA diners.utilitarios.genericos
+
+
+CREATE COMPUTE MODULE DepositarMQ_ProcesarMensaje
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot.Properties = InputRoot.Properties;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+		
+		-- Copiar la entrada en el mensaje
+		SET OutputRoot.XMLNSC.MQ.DatosServicio = Environment.DatosServicio;
+		IF FIELDTYPE(Environment.Header.[<]) IS NOT NULL AND FIELDTYPE(Environment.DatosServicio.nsHeader) IS NOT NULL THEN
+			SET Environment.Header.{Environment.DatosServicio.nsHeader}:dinHeader.{Environment.DatosServicio.nsHeader}:uuid = Environment.DatosServicio.uuidWS || 'MQService';
+			SET OutputRoot.XMLNSC.MQ.Header = Environment.Header;
+		END IF;
+		SET OutputRoot.XMLNSC.MQ.Body.{Environment.DatosServicio.operacion}.dinBody = Environment.FlujosMQ.Entrada; --.{Environment.DatosServicio.operacion}.dinBody
+		
+		/*Método para imprimir logs*/
+		DECLARE referencia REFERENCE TO Environment;
+		CALL diners.logs.ImprimirLogs(OutputRoot.XMLNSC, 'MQ_' || Environment.FlujosMQ.NombreCola, 'E', referencia);
+		
+		-- Colocar el timeout
+		IF FIELDTYPE(Environment.FlujosMQ.Timeout) IS NOT NULL THEN
+			SET InputLocalEnvironment.MQ.GET.MQGMO.WaitInterval = Environment.FlujosMQ.Timeout;
+		END IF;
+		
+		-- Seleccionar la cola de destino
+		SET InputLocalEnvironment.Destination.MQDestinationList.DestinationData[1].queueName = Environment.FlujosMQ.NombreCola;
+		SET InputLocalEnvironment.MQ.GET.QueueName = Environment.FlujosMQ.NombreCola;
+		
+		RETURN TRUE;
+	END;
+END MODULE;
+
+CREATE COMPUTE MODULE DepositarMQ_ProcesarSalida
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot.Properties = InputRoot.Properties;
+		
+		-- Copiar el mensaje de salida en el entorno.
+		CREATE LASTCHILD OF Environment.FlujosMQ DOMAIN('XMLNSC') TYPE XMLNSC.Folder NAME 'Salida';
+		--SET Environment.FlujosMQ.Salida = InputRoot.XMLNSC;
+		
+		-- Borrar los datos de entrada.
+		SET Environment.FlujosMQ.Entrada = NULL;
+		
+		-- Colocar la respuesta
+		SET Environment.FlujosMQ.Salida.codError = '0';
+		SET Environment.FlujosMQ.Salida.descError = 'OK';
+		
+		/*Método para imprimir logs*/
+		DECLARE referencia REFERENCE TO Environment;
+		CALL diners.logs.ImprimirLogs(Environment.FlujosMQ, 'MQ_' || Environment.FlujosMQ.NombreCola, 'S', referencia);
+		
+		RETURN TRUE;
+	END;
+END MODULE;
+
+CREATE COMPUTE MODULE DepositarMQ_SetearError
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot.Properties = InputRoot.Properties;
+		
+		-- Seleccionar error
+		CREATE LASTCHILD OF Environment.FlujosMQ DOMAIN('XMLNSC') TYPE XMLNSC.Folder NAME 'Salida';
+		
+		-- Revisar si existe mensajes en la lista de excepciones.
+		IF CARDINALITY(InputExceptionList.*[]) > 0 THEN
+			DECLARE codError INTEGER 0;
+			DECLARE descError CHARACTER;
+			DECLARE ListaExcepciones REFERENCE TO InputExceptionList;
+	
+			CALL obtenerException(ListaExcepciones, codError, descError);
+			
+			SET Environment.FlujosMQ.Salida.codError = '9997';
+			SET Environment.FlujosMQ.Salida.descError = 'MQService('||Environment.FlujosMQ.NombreCola||'):ESB-'||CAST(codError AS CHARACTER)||' - '||descError;
+		ELSE
+			-- Procesar Error
+			SET Environment.FlujosMQ.Salida.codError = '9999';
+			SET Environment.FlujosMQ.Salida.descError = 'MQService('||Environment.FlujosMQ.NombreCola||'):Error al invocar el servicio MQ.';
+		END IF;
+		
+		/*Método para imprimir logs*/
+		DECLARE referencia REFERENCE TO Environment;
+		CALL diners.logs.ImprimirLogs(Environment.FlujosMQ.Salida, 'MQ_' || Environment.FlujosMQ.NombreCola, 'S', referencia);
+		
+		-- Borrar los datos de entrada.
+		SET Environment.FlujosMQ.Entrada = NULL;
+		
+		RETURN TRUE;
+	END;
+	
+	/*
+	 * Obtiene la última excepción que se ha tenido.
+	 *
+	 * Parameters:
+	 *
+	 * IN ListaExcepciones: Lista de excepciones a procesar, generalmente debe
+	 * ser una referencia al InputExceptionList.
+	 * OUT codError: Parámetro de salida con el código de error de
+	 * obtenido desde la lista de excepciones,
+	 * OUT descError: Parámetro de salida que obtendrá la descripción del
+	 * error según el formato.
+	 */
+	CREATE PROCEDURE obtenerException( IN ListaExcepciones REFERENCE, OUT codError INTEGER, OUT descError CHARACTER )
+	BEGIN
+		-- Apuntar la la primer excepción.
+		DECLARE pExcepcion REFERENCE TO ListaExcepciones.*[1];
+		-- Recoger la última excepción.
+		WHILE LASTMOVE(pExcepcion) DO
+			IF pExcepcion.Number IS NOT NULL THEN
+				SET codError = pExcepcion.Number;
+				SET descError = '('||pExcepcion.Type||')'||pExcepcion.Label||': '|| pExcepcion.Text||' -- (';
+				-- Colocar el rastreo
+				FOR eInsert AS pExcepcion.Insert[] DO
+					SET descError = descError || '[' || CAST(eInsert.Type AS CHARACTER) || ']' || eInsert.Text || ',';
+				END FOR;
+	
+				SET descError = LEFT(descError, LENGTH(descError)-1) || ')';
+			END IF;
+	
+			MOVE pExcepcion LASTCHILD;
+		END WHILE;
+	END;
+END MODULE;

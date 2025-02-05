@@ -1,0 +1,161 @@
+BROKER SCHEMA diners.utilitarios
+
+
+DECLARE variablesUDP SHARED ROW;
+/*
+* Método global, crea un árbol con los datos de un servicio configurable
+* y lo guarda en el Environment.
+*
+* Parameters:
+*
+* IN nombreServicio CHARACTER: Nombre del servicio configurable que se
+* va a cargar.
+* INOUT obj REFERENCE: Referencia a un árbol donde se colocarán
+* los parámetros cargados.
+*/
+CREATE PROCEDURE CargarVariables (IN Output REFERENCE, IN nombreProveedor CHARACTER, INOUT Environment REFERENCE)
+
+BEGIN
+	DECLARE nsHea NAMESPACE Environment.DatosServicio.nsHeader;
+	
+	-- Guardar el cache del servicio, si es que no ha sido antes actualizado.
+	variables : BEGIN ATOMIC
+		--Validar si existe el header
+		IF nsHea IS NOT NULL THEN
+			IF FIELDTYPE(Environment.Header.nsHea:dinHeader) IS NOT NULL THEN
+				--Recargar cache
+				IF UPPER(Environment.Header.nsHea:dinHeader.nsHea:aplicacionID) = 'CACHE' THEN
+					--SET variablesUDP = NULL;
+					DELETE FIELD variablesUDP.cargado.{nombreProveedor};
+					SET variablesUDP.datos.{nombreProveedor} = NULL;
+				END IF;
+			END IF;
+		END IF;
+
+		DECLARE carpeta REFERENCE TO Output;
+		CREATE LASTCHILD OF Environment.cache.service AS carpeta DOMAIN ('XMLNSC') NAME nombreProveedor;
+		IF variablesUDP.cargado.{nombreProveedor} IS NULL THEN
+			DECLARE datosServicio REFERENCE TO Environment.DatosServicio;
+			SET carpeta.ServicioInfo.nombreServicio = datosServicio.nombreServicio;
+			SET carpeta.ServicioInfo.operacion = datosServicio.operacion;
+			SET carpeta.ServicioInfo.puerto = datosServicio.portHost;
+			SET carpeta.ServicioInfo.uuid = datosServicio.uuidWS;
+			
+			CALL leerVariables(nombreProveedor , carpeta);
+			
+			DELETE FIELD carpeta.ServicioInfo;
+			
+			IF FIELDTYPE(variablesUDP.datos) IS NULL THEN
+				CREATE LASTCHILD OF variablesUDP DOMAIN ('XMLNSC') NAME 'datos';
+			END IF;
+			
+			SET variablesUDP.cargado.{nombreProveedor} = TRUE;
+			SET variablesUDP.datos.{nombreProveedor} = Environment.cache.service.{nombreProveedor};
+		ELSE
+			SET Environment.cache.service.{nombreProveedor} = variablesUDP.datos.{nombreProveedor};
+		END IF;
+	END variables;
+END;
+
+/*
+* Invoca al método Java que lee la información de un servicio configurable
+* y la guarda en un árbol
+*
+* Parameters:
+*
+* IN nombreServicio CHARACTER: Nombre del servicio configurable que se
+* va a cargar.
+* INOUT obj REFERENCE: Referencia a un árbol donde se colocarán
+* los parámetros cargados.
+*/
+CREATE PROCEDURE CargarServicioConfigurable (IN nombreProveedor CHARACTER, INOUT Environment REFERENCE)
+BEGIN
+	DECLARE nsHea NAMESPACE Environment.DatosServicio.nsHeader;
+	
+	-- Guardar el cache del servicio, si es que no ha sido antes actualizado.
+	variables : BEGIN ATOMIC
+		--Validar si existe el header
+		IF nsHea IS NOT NULL THEN
+			IF FIELDTYPE(Environment.Header.nsHea:dinHeader) IS NOT NULL THEN
+				--Recargar cache
+				IF UPPER(Environment.Header.nsHea:dinHeader.nsHea:aplicacionID) = 'CACHE' THEN
+					DELETE FIELD variablesUDP.cargado.{nombreProveedor};
+					SET variablesUDP.datos.{nombreProveedor} = NULL;
+				END IF;
+			END IF;
+		END IF;
+
+		CREATE LASTCHILD OF Environment.cache.service DOMAIN('XMLNSC') NAME nombreProveedor;
+		DECLARE carpeta REFERENCE TO Environment.cache.service.{nombreProveedor};
+		IF variablesUDP.cargado.{nombreProveedor} IS NULL THEN
+			DECLARE datosServicio REFERENCE TO Environment.DatosServicio;
+			SET carpeta.ServicioInfo.nombreServicio = datosServicio.nombreServicio;
+			SET carpeta.ServicioInfo.operacion = datosServicio.operacion;
+			SET carpeta.ServicioInfo.puerto = datosServicio.portHost;
+			SET carpeta.ServicioInfo.uuid = datosServicio.uuidWS;
+		
+			CALL leerVariables(nombreProveedor , carpeta);
+			
+			DELETE FIELD carpeta.ServicioInfo;
+			
+			IF FIELDTYPE(variablesUDP.datos) IS NULL THEN
+				CREATE LASTCHILD OF variablesUDP DOMAIN('XMLNSC') NAME 'datos';
+			END IF;
+			
+			SET variablesUDP.cargado.{nombreProveedor} = TRUE;
+			SET variablesUDP.datos.{nombreProveedor} = Environment.cache.service.{nombreProveedor};
+		ELSE
+			SET Environment.cache.service.{nombreProveedor} = variablesUDP.datos.{nombreProveedor};
+		END IF;
+	END variables;
+END;
+
+/*
+* Invoca al método Java que lee la información de un servicio configurable
+* y la guarda en un árbol
+*
+* Parameters:
+*
+* IN nombreServicio CHARACTER: Nombre del servicio configurable que se
+* va a cargar.
+* INOUT obj REFERENCE: Referencia a un árbol donde se colocarán
+* los parámetros cargados.
+*/
+CREATE PROCEDURE CargarVariablesGenerales (IN nombreProveedor CHARACTER, INOUT Environment REFERENCE)
+BEGIN
+	-- Guardar el cache del servicio, si es que no ha sido antes actualizado.
+	DECLARE carpeta REFERENCE TO Environment;
+	CREATE LASTCHILD OF Environment.cache.service AS carpeta DOMAIN('XMLNSC') NAME nombreProveedor;
+	CALL leerVariables(nombreProveedor , carpeta);
+END;
+
+/*
+* Invoca al método Java que lee la información de un servicio configurable
+* y la guarda en un árbol
+*
+* Parameters:
+*
+* IN nombreServicio CHARACTER: Nombre del servicio configurable que se
+* va a cargar.
+* INOUT obj REFERENCE: Referencia a un árbol donde se colocarán
+* los parámetros cargados.
+*/
+CREATE PROCEDURE leerVariables ( IN nombreServicio CHARACTER, INOUT obj REFERENCE )
+LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.util.SetServiceConfigurable.leerVariables";
+
+/*
+* Invoca al método Java que lee la información de un servicio configurable
+* y la guarda en un árbol
+*
+* Parameters:
+*
+* IN nombreServicio CHARACTER: Nombre del servicio configurable que se
+* va a cargar.
+* INOUT obj REFERENCE: Referencia a un árbol donde se colocarán
+* los parámetros cargados.
+*/
+CREATE PROCEDURE leerConectorDestino ( IN nombreServicio CHARACTER, IN grupoEjecucion CHARACTER )
+RETURNS CHARACTER
+LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.util.SetServiceConfigurable.obtenerConectorDestino";

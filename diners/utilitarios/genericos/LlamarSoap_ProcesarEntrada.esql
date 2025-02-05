@@ -1,0 +1,233 @@
+BROKER SCHEMA diners.utilitarios.genericos
+
+/*
+ * Método utilizado para setear la configuración enviada por el Environment a la configuración del nodo SOAPRequest
+ * Se asigna la URL, SoapAction y TimeOut a dicho nodo.
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 05 Abril 2017
+ *
+ */
+CREATE COMPUTE MODULE LlamarSoap_ProcesarEntrada
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+		SET OutputRoot.Properties = InputRoot.Properties;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+		SET Environment.FlujosSOAP.salida = NULL;
+	
+		SET OutputRoot.SOAP.Body = Environment.FlujosSOAP.Input;
+		
+		SET Environment.FlujosSOAP.operacion = FIELDNAME(Environment.FlujosSOAP.Input.[<]);
+		/*Método para imprimir logs*/
+		DECLARE referencia REFERENCE TO Environment;
+		CALL diners.logs.ImprimirLogs(OutputRoot.SOAP, 'WS_' || Environment.FlujosSOAP.operacion, 'E', referencia);
+			
+		-- Se verifica si hay valor en el timeOut
+		IF Environment.FlujosSOAP.Timeout IS NOT NULL THEN
+			DECLARE timeOut INTEGER CAST(Environment.FlujosSOAP.Timeout AS INTEGER);
+			IF timeOut < 40 THEN
+				SET timeOut = timeOut * 1000;
+				SET InputLocalEnvironment.Destination.SOAP.Request.Transport.HTTP.TimeoutMillis = timeOut;
+			END IF;
+		END IF;
+		
+		IF FIELDTYPE(Environment.FlujosSOAP.Proxy) IS NOT NULL THEN
+			SET InputLocalEnvironment.Destination.SOAP.Request.Transport.HTTP.ProxyURL = Environment.FlujosSOAP.Proxy;
+		END IF;
+		
+		IF Environment.FlujosSOAP.SOAPAction IS NOT NULL THEN
+			SET OutputRoot.HTTPRequestHeader.SOAPAction = Environment.FlujosSOAP.SOAPAction;
+		END IF;
+		-- Procesar en caso de que sea para la versión 1.2
+		IF Environment.FlujosSOAP.version = '1.2' THEN
+			SET OutputRoot.SOAP.Context.SOAP_Version = '1.2';
+	
+			DECLARE soapenc NAMESPACE 'http://www.w3.org/2003/05/soap-envelope';
+			SET OutputRoot.SOAP.Context.Namespace.(SOAP.NamespaceDecl)xmlns:soap12 = soapenc;
+			SET OutputRoot.SOAP.Context.SOAP_Version = '1.2';
+		END IF;
+		-- Seleccionar la URL del servicio.
+		SET InputLocalEnvironment.Destination.SOAP.Request.Transport.HTTP.WebServiceURL = Environment.FlujosSOAP.URL;
+		-- Tal vez se necesite alguno de estos 2 algoritmos
+		IF Environment.FlujosSOAP.autentificar IS NOT NULL AND Environment.FlujosSOAP.autentificar IS TRUE AND
+			Environment.FlujosSOAP.user IS NOT NULL AND Environment.FlujosSOAP.password IS NOT NULL THEN
+			DECLARE user REFERENCE TO Environment.FlujosSOAP.user;
+			DECLARE password REFERENCE TO Environment.FlujosSOAP.password;
+			-- Colocar el usuario y el password para que el IIB maneje
+			-- automáticamente.
+			SET OutputRoot.Properties.IdentitySourceType = 'usernameAndPassword';
+			SET OutputRoot.Properties.IdentitySourceToken = user;
+			SET OutputRoot.Properties.IdentitySourcePassword = password;
+		END IF;
+		RETURN TRUE;
+	END;
+
+END MODULE;
+
+/*
+ * En caso de ocurrir una excepción se contruye un árbol de salida con un código y descripción
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 05 Abril 2017
+ *
+ */
+CREATE COMPUTE MODULE LlamarSoap_SetearError
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot.Properties = InputRoot.Properties;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+		DECLARE soapUrl CHARACTER;
+	
+		CALL ObtenerSOAPUrl(Environment) INTO soapUrl;
+	
+		-- Borrar las entradas y salidas
+		SET Environment.FlujosSOAP.Input = NULL;
+		SET Environment.FlujosSOAP.salida = NULL;
+		
+		DECLARE codError INTEGER 0;
+		DECLARE descError CHARACTER;
+		-- Verificar si se tiene errores en esta línea de código.
+		IF CARDINALITY(InputExceptionList.*[]) > 0 THEN
+			SET codError = 0;
+			SET descError = '';
+			DECLARE ListaExcepciones REFERENCE TO InputExceptionList;
+	
+			CALL obtenerException(ListaExcepciones, codError, descError);
+	
+			SET Environment.FlujosSOAP.salida.codError = codError;
+			SET Environment.FlujosSOAP.salida.descError = 'SOAP(' || soapUrl || '):ESB-' || CAST(codError AS CHARACTER) || ' - ' || descError;
+		ELSE
+			DECLARE soapNS NAMESPACE 'http://schemas.xmlsoap.org/soap/envelope/';
+			DECLARE soapNS2 NAMESPACE 'http://www.w3.org/2003/05/soap-envelope';
+	
+			IF InputRoot.SOAP.Body.soapNS:Fault.faultstring IS NOT NULL OR
+				InputRoot.SOAP.Body.soapNS2:Fault.soapNS2:Code.soapNS2:Value IS NOT NULL THEN
+				SET Environment.FlujosSOAP.salida.codError = '993';
+				IF Environment.FlujosSOAP.version = '1.2' THEN
+					SET Environment.FlujosSOAP.salida.descError = InputRoot.SOAP.Body.soapNS2:Fault.soapNS2:Reason.soapNS2:Text;
+				ELSE
+					SET Environment.FlujosSOAP.salida.descError = InputRoot.SOAP.Body.soapNS:Fault.faultstring;
+				END IF;
+			ELSE
+				SET Environment.FlujosSOAP.salida.codError = '999';
+				SET Environment.FlujosSOAP.salida.descError = 'SOAP(' || soapUrl || '):Error al enviar mensaje SOAP.';
+			END IF;
+		END IF;
+		
+		/*Método para imprimir logs*/
+		DECLARE referencia REFERENCE TO Environment;
+		CALL diners.logs.ImprimirLogs(Environment.FlujosSOAP.salida, 'WS_' || Environment.FlujosSOAP.operacion, 'S', referencia);
+		
+		-- Borrar datos creados
+		SET OutputLocalEnvironment.Destination.SOAP = NULL;
+	
+		RETURN TRUE;
+		
+	END;
+END MODULE;
+
+/*
+ * En caso exitoso se obtiene la respuesta del árbol construido en la clase JAVA y se la asigna al Environment posteriormente se elimina el contenido del OUTPUT.XMLNCS y 
+ * el árbol de entrada del AS400
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 05 Abril 2017
+ *
+ */
+CREATE COMPUTE MODULE LlamarSoap_ProcesarSalida
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot.Properties = InputRoot.Properties;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+
+		-- Borrar la entrada del servicio
+		SET Environment.FlujosSOAP.Input = NULL;
+		-- Copiar la salida del servicio
+		SET Environment.FlujosSOAP.salida = InputRoot.SOAP;
+		
+		/*Método para imprimir logs*/
+		DECLARE referencia REFERENCE TO Environment;
+		CALL diners.logs.ImprimirLogs(InputRoot.SOAP, 'WS_' || Environment.FlujosSOAP.operacion, 'S', referencia);
+
+		SET Environment.FlujosSOAP.salida.codError = '0';
+		SET Environment.FlujosSOAP.salida.descError = 'OK';
+		-- Borrar datos
+		SET OutputLocalEnvironment.Destination.SOAP = NULL;
+		----Print Complete Logs----
+		IF FIELDTYPE(Environment.cache.service.log) IS NOT NULL AND CONTAINS(Environment.cache.service.log,'soap') OR CONTAINS(Environment.cache.service.log,'all') THEN
+			DECLARE salida REFERENCE TO Environment;
+			
+			-- Cleasr All Data
+			SET Environment.log.blob = NULL;
+			SET Environment.log.soapComplete = NULL;
+		END IF;
+
+		RETURN TRUE;
+		
+	END;
+END MODULE;
+
+/*
+ * Obtiene la url que se va a invocar
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 05 Abril 2017
+ *
+ */
+CREATE PROCEDURE ObtenerSOAPUrl ( IN Environment REFERENCE ) RETURNS CHARACTER
+BEGIN
+	DECLARE soapUrl CHARACTER;
+
+	SET soapUrl = Environment.FlujosSOAP.SOAPAction;
+
+	IF soapUrl IS NULL THEN
+		SET soapUrl = 'desconocido';
+	END IF;
+
+	RETURN soapUrl;
+END;
+
+/*
+ * Recorre la lista de Excepciones
+ *
+ * Parameters:
+ * IN : InputTree Referencia al árbol de excepciones
+ * OUT : messageNumber Código de la excepcion
+ * OUT : messageText Descripción de la excepcion
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 05 Abril 2017
+ *
+ */
+CREATE PROCEDURE obtenerException(IN InputTree REFERENCE,OUT messageNumber INTEGER,
+	OUT messageText CHAR)
+	/****************************************************************************
+	* A procedure that will get the details of the last exception from a message
+	* IN InputTree: The incoming exception list
+	* IN messageNumber: The last message numberr.
+	* IN messageText: The last message text.
+	*****************************************************************************/
+	BEGIN
+	-- Create a reference to the first child of the exception list
+	SET messageText = 'Lista de Errores';
+	DECLARE ptrException REFERENCE TO InputTree.*[1];
+	-- keep looping while the moves to the child of exception list work
+	WHILE lastmove(ptrException) DO
+		-- store the current values for the error number and text
+		IF ptrException.Number IS NOT NULL THEN
+			SET messageNumber = ptrException.Number;
+			SET messageText = messageText || ' | ' || ptrException.Text || ' -- (';
+			
+			-- Colocar el rastreo
+			FOR eInsert AS ptrException.Insert[] DO
+				SET messageText = messageText || '[' || CAST(eInsert.Type AS CHARACTER) || ']' || eInsert.Text || ',';
+			END FOR;
+			
+			SET messageText = LEFT(messageText, LENGTH(messageText)-1) || ')';
+			
+		END IF;
+		-- now move to the last child which should be the next exceptionlist
+		MOVE ptrException LASTCHILD;
+	END WHILE;
+END;

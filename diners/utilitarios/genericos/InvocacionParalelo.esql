@@ -1,0 +1,92 @@
+BROKER SCHEMA diners.utilitarios.genericos
+
+
+
+CREATE COMPUTE MODULE InvocacionParalelo
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		DECLARE i INT 1;
+		
+		SET Environment.NumeroInvocacion = 1;
+		FOR source AS Environment.InvocacionParalelo.Peticion[] DO
+          SET Environment.Invocacion[i].Data = source.Data;
+          SET Environment.Invocacion[i].Cola = source.Cola;   
+          SET Environment.Invocacion[i].ColaRespuesta = source.ColaRespuesta; 
+          SET Environment.Invocacion[i].TimeOut = source.TimeOut;         
+          PROPAGATE TO LABEL 'Invocar' DELETE NONE;
+          SET i = i + 1;
+		END FOR;
+		SET i = 1;
+		SET Environment.NumeroRecepcion = 1;
+		FOR source AS Environment.InvocacionParalelo.Peticion[] DO
+          PROPAGATE TO LABEL 'Recibir' DELETE NONE;
+          SET i = i + 1;
+		END FOR;
+		RETURN TRUE;
+	END;
+
+END MODULE;
+CREATE COMPUTE MODULE EnviarPeticion
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		DECLARE indice INTEGER Environment.NumeroInvocacion;
+		SET OutputLocalEnvironment.Destination.MQ.DestinationData[1].queueName = Environment.Invocacion[indice].Cola;
+		--SET OutputRoot.XMLNSC = Environment.Invocacion[indice].Data;
+		
+		-- Copiar la entrada en el mensaje
+		SET OutputRoot.XMLNSC.MQ.DatosServicio = Environment.DatosServicio;
+		IF FIELDTYPE(Environment.Header.[<]) IS NOT NULL AND FIELDTYPE(Environment.DatosServicio.nsHeader) IS NOT NULL THEN
+			SET Environment.Header.{Environment.DatosServicio.nsHeader}:dinHeader.{Environment.DatosServicio.nsHeader}:uuid = Environment.DatosServicio.uuidWS || 'MQService';
+			SET OutputRoot.XMLNSC.MQ.Header = Environment.Header;
+		END IF;
+		SET OutputRoot.XMLNSC.MQ.Body.{Environment.DatosServicio.operacion}.dinBody = Environment.Invocacion[indice].Data; 
+		
+		DECLARE referencia REFERENCE TO Environment;
+		CALL diners.logs.ImprimirLogs(Environment.Invocacion[indice].Data, 'InvocacionSincrona_' || Environment.Invocacion[indice].Cola, 'E', referencia);
+		
+		RETURN TRUE;
+	END;
+
+END MODULE;
+
+CREATE COMPUTE MODULE RecibirPeticion
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		DECLARE indice INTEGER Environment.NumeroRecepcion;
+		SET OutputRoot.MQMD.MsgId = Environment.Invocacion.Destino.msgId[indice];
+		SET OutputLocalEnvironment.MQ.GET.QueueName = Environment.Invocacion[indice].ColaRespuesta;
+		SET OutputLocalEnvironment.MQ.GET.MQGMO.WaitInterval = Environment.Invocacion[indice].TimeOut;
+		RETURN TRUE;
+	END;
+
+END MODULE;
+
+CREATE COMPUTE MODULE GenerarMensajes
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		DECLARE indice INTEGER Environment.NumeroRecepcion;
+		SET Environment.NumeroRecepcion = Environment.NumeroRecepcion + 1;
+		IF FIELDNAME(InputRoot.XMLNSC) IS NOT NULL THEN
+			SET Environment.InvocacionParalelo.Respuesta[indice] = InputRoot.XMLNSC;
+		ELSE
+			SET Environment.InvocacionParalelo.Respuesta[indice].Codigo= '9999';
+			SET Environment.InvocacionParalelo.Respuesta[indice].Descripcion= 'TimeOut';
+		END IF;
+		
+		DECLARE referencia REFERENCE TO Environment;
+		CALL diners.logs.ImprimirLogs(Environment.InvocacionParalelo.Respuesta[indice], 'InvocacionSincrona_' || Environment.Invocacion[indice].ColaRespuesta, 'S', referencia);
+			
+		RETURN TRUE;
+	END;
+
+END MODULE;
+
+CREATE COMPUTE MODULE ValidarCabeceras
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		CREATE LASTCHILD OF  Environment.Invocacion.Destino NAME 'msgId' VALUE InputLocalEnvironment.WrittenDestination.MQ.DestinationData[1].msgId;
+		SET Environment.NumeroInvocacion = Environment.NumeroInvocacion + 1;
+		RETURN TRUE;
+	END;
+
+END MODULE;

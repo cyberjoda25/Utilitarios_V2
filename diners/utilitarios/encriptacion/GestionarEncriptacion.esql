@@ -1,0 +1,691 @@
+BROKER SCHEMA diners.utilitarios.encriptacion
+
+DECLARE path EXTERNAL CHARACTER '';
+
+CREATE PROCEDURE encriptar (IN cryptoText CHAR ,IN header reference) RETURNS CHAR
+BEGIN
+	DECLARE returnString CHAR;
+	DECLARE J INTEGER;
+	DECLARE I INTEGER 1;
+	DECLARE K INTEGER 1;
+	DECLARE key CHAR '';
+	DECLARE channel CHAR '';
+	DECLARE pathRelativo CHAR;
+	SET pathRelativo = path;
+	SET J = CARDINALITY(header.*[]);
+	WHILE I <= J DO
+		
+		IF FIELDNAME(header.[I]) = 'canalID' THEN
+			SET channel = header.[I];
+		END IF;
+		
+		IF FIELDNAME(header.[I]) = 'llaveSimetrica' THEN
+			SET key = header.[I];
+		END IF;
+		SET I = I + 1;
+	END WHILE;	
+	
+	CALL encryptionJava(cryptoText,key,channel) INTO returnString;
+	
+	IF returnString = '' THEN
+		THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1235 VALUES
+   ('Error al encriptar los datos', 'Error al sencriptar los datos');
+	END IF;
+	
+	RETURN returnString;
+END;
+
+CREATE PROCEDURE desencriptar (IN cryptoText CHAR ,IN header reference) RETURNS CHAR
+BEGIN
+	DECLARE returnString CHAR;
+	DECLARE J INTEGER;
+	DECLARE I INTEGER 1;
+	DECLARE K INTEGER 1;
+	DECLARE key CHAR '';
+	DECLARE channel CHAR '';
+	SET J = CARDINALITY(header.*[]);
+	WHILE I <= J DO
+		
+		IF FIELDNAME(header.[I]) = 'canalID' THEN
+			SET channel = header.[I];
+		END IF;
+		
+		IF FIELDNAME(header.[I]) = 'llaveSimetrica' THEN
+			SET key = header.[I];
+		END IF;
+		SET I = I + 1;
+	END WHILE;	
+	CALL decryptionJava(cryptoText,key,channel) INTO returnString;
+	
+	IF returnString = '' THEN
+		THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1235 VALUES
+   ('Error al desencriptar los datos', 'Error al desencriptar los datos');
+	END IF;
+	
+	
+	RETURN returnString;
+END;
+
+
+
+/*
+ * Método principal para encriptar de forma dinámica el cual llama a una función JAVA,
+ *
+ * Parameters:
+ * IN : Environment.Encriptacion.nomServiceConfig  	= Nombre del Servicio Configurable a cargar
+ * IN : Environment.Encriptacion.proveedor		 	= Flag indicador para cargar la llave Publica o PublicaProveedor
+ * IN : Environment.Encriptacion.Encriptar			= Determina con una 'E' para procesar la Encriptacion y con una 'D' para procesar la Desencriptacion
+ * IN : Environment.Encriptacion.Randomico			= Determina con una 'R' para obtener una llave simetrica aleatoria o vacio para obtener una llave simetrica estatica desde un UDP
+ * IN : Environment.Encriptacion.listaDatos.dato	= El dato a encriptar
+ * OUT : Environment.Encriptacion.returnString		= Valor encriptado de salida
+ * INOUT : Environment.Encriptacion.llaveSimetrica	= Llave encriptada
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 04 SEPTIEMBRE 2018
+**/
+CREATE PROCEDURE EncriptacionEntidad (INOUT Environment REFERENCE)
+BEGIN
+	DECLARE nomServiceConfig, proveedor, canal, aplicationId, dato, returnString, llaveSimetrica, randomico, encriptar CHARACTER; 
+	
+	DECLARE datos REFERENCE TO Environment.Encriptacion;
+	DECLARE dinheader REFERENCE TO Environment.Header.[<];
+	DECLARE nsHeader NAMESPACE Environment.DatosServicio.nsHeader;
+	
+	SET nomServiceConfig = datos.nomServiceConfig;
+	SET proveedor = datos.proveedor;
+	SET canal = dinheader.nsHeader:canalID;
+	SET aplicationId = dinheader.nsHeader:aplicacionID;
+	--SET dato = datos.listaDatos.dato;
+	SET randomico = UCASE(datos.Randomico);
+	SET llaveSimetrica = datos.llaveSimetrica; 
+	
+	SET encriptar = UCASE(datos.Encriptar);
+	
+	DECLARE keySymetric, keyPublic, valorProp1, valorProp2 CHARACTER;
+	CALL obtenerParamEncriptacion(nomServiceConfig,encriptar,proveedor,aplicationId,canal,randomico,keySymetric,keyPublic,valorProp1,valorProp2,Environment);
+	
+	IF encriptar = 'E' THEN
+		BEGIN
+		 DECLARE EXIT HANDLER FOR SQLSTATE LIKE'%' 
+	   	 BEGIN 
+	   		 SET returnString = '';
+	   	 END;
+		 IF keySymetric <> '' THEN
+		 	DECLARE listaDatos REFERENCE TO datos.listaDatos.Datos;
+			WHILE LASTMOVE(listaDatos) = TRUE DO
+				CALL EncrypLlavesProveedor(keySymetric,listaDatos.valor) INTO returnString;
+				
+				CREATE LASTCHILD OF listaDatos NAME 'datoEncriptado' VALUE returnString;
+				
+				MOVE listaDatos NEXTSIBLING;
+			END WHILE;
+		 	
+			 CALL getLlaveSimetrica(keyPublic,keySymetric) INTO llaveSimetrica;
+		 END IF;
+		END;
+		
+		IF returnString = '' OR (keySymetric = '' OR keySymetric = NULL) THEN
+			SET Environment.validarError = 3;
+			THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1235 VALUES ('Error al encriptar los datos', 'Error al encriptar los datos');
+		END IF;
+		
+		SET datos.llaveSimetrica = llaveSimetrica;
+	ELSE IF encriptar = 'D' THEN
+		
+		BEGIN
+		 DECLARE EXIT HANDLER FOR SQLSTATE LIKE'%' 
+	   	 BEGIN 
+	   		 SET returnString = '';
+	   	 END;
+	   	 
+	   	 IF keySymetric <> '' THEN
+	   	 	DECLARE listaDatos REFERENCE TO datos.listaDatos.Datos;
+			WHILE LASTMOVE(listaDatos) = TRUE DO
+				CALL DecrypLlavesProveedor(listaDatos.valor,keySymetric,llaveSimetrica) INTO returnString;
+				
+				CREATE LASTCHILD OF listaDatos NAME 'datoDesencriptado' VALUE returnString;
+				
+				MOVE listaDatos NEXTSIBLING;
+			END WHILE;
+	   	 	
+			--CALL DecrypLlavesProveedor(dato,keySymetric,llaveSimetrica) INTO returnString;
+		 END IF;
+		END;
+		
+		IF returnString = '' OR (keySymetric = '' OR keySymetric = NULL) THEN
+			SET Environment.validarError = 3;
+			THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1235 VALUES ('Error al desencriptar los datos', 'Error al desencriptar los datos');
+		END IF;
+		
+	END IF;
+	END IF;
+	
+END;
+
+
+CREATE PROCEDURE obtenerParamEncriptacion (IN nomServiceConfig CHARACTER, IN encriptar CHARACTER, IN proveedor CHARACTER, IN aplicationId CHARACTER, IN canal CHARACTER, IN randomico CHARACTER, 
+INOUT keySymetric CHARACTER, INOUT keyPublic CHARACTER, INOUT valorProp CHARACTER, INOUT valorProp2 CHARACTER, INOUT Environment REFERENCE)
+BEGIN
+	
+	DECLARE referencia REFERENCE TO Environment;
+	CALL diners.utilitarios.CargarServicioConfigurable(nomServiceConfig, referencia);
+	DECLARE propiedades REFERENCE TO Environment.cache.service.{nomServiceConfig};
+	
+	IF encriptar = 'E' THEN
+		IF randomico = 'R' THEN
+			CALL genLlaveSimetrica(32) INTO keySymetric;
+		ELSE
+			SET valorProp = aplicationId || canal || 'SIMETRIC';
+			SET keySymetric = propiedades.{valorProp};	
+		END IF;
+		
+		IF proveedor <> 'P' THEN
+			SET valorProp2 = aplicationId || canal || 'PUBLIC';
+		ELSE
+			SET valorProp2 = aplicationId || canal || 'PUBLICPROVEEDOR';
+		END IF;
+		
+		SET keyPublic = propiedades.{valorProp2};
+		
+	ELSE IF UCASE(encriptar) = 'D' THEN
+		
+		SET valorProp = aplicationId || canal || 'PRIVATE';
+		SET keySymetric = propiedades.{valorProp};
+		
+	END IF;
+	END IF;
+	
+END;
+
+
+
+/*
+ * Método para encriptar de forma dinámica el cual llama a una función JAVA 
+ *
+ * Parameters:
+ * IN : nomServiceConfig  = nombre del Servicio Configurable a cargar
+ * IN : proveedor			= Flag indicador para cargar la llave Publica o PublicaProveedor
+ * IN : canal		= El canal del header
+ * IN : aplicationId		= El aplicationId del header
+ * IN : dato		= El dato a encriptar
+ * INOUT : returnString		= Valor encriptado de salida
+ * INOUT : llaveSimetrica		= Llave encriptada
+ * INOUT : Environment		= Environment de referencia
+ *
+ * Autor: Daniel Rocha 
+ * Fecha: 26 MAYO 2021
+**/
+CREATE PROCEDURE encriptarBanca (IN nomServiceConfig CHARACTER, IN dato CHARACTER, INOUT Environment REFERENCE) RETURNS CHAR
+BEGIN
+	DECLARE returnString CHARACTER '';
+	DECLARE referencia REFERENCE TO Environment;
+	CALL diners.utilitarios.CargarServicioConfigurable(nomServiceConfig, referencia);
+	DECLARE propiedades REFERENCE TO Environment.cache.service.{nomServiceConfig};
+	
+	DECLARE keySymetric, keyPrivate CHARACTER;
+	SET keySymetric = propiedades.BANCATCHINSIMETRIC;
+	SET keyPrivate = propiedades.BANCATCHINPRIVATE;
+	
+	BEGIN
+	 DECLARE EXIT HANDLER FOR SQLSTATE LIKE'%' 
+   	 BEGIN 
+   		 SET returnString = '';
+   	 END;
+	 IF keySymetric <> '' THEN
+		 CALL EncrypLlavesBanca(keyPrivate, keySymetric, dato) INTO returnString;
+		 -- CALL getLlaveSimetrica(keyPublic,keySymetric) INTO llaveSimetrica;
+	 END IF;
+	END;
+	
+	IF returnString = '' OR (keySymetric = '' OR keySymetric = NULL) THEN
+		SET Environment.validarError = 3;
+		THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1235 VALUES ('Error al encriptar los datos', 'Error al encriptar los datos');
+	END IF;
+	RETURN returnString;
+END;
+
+
+
+/*
+ * Método para encriptar de forma dinámica el cual llama a una función JAVA 
+ *
+ * Parameters:
+ * IN : nomServiceConfig  = nombre del Servicio Configurable a cargar
+ * IN : proveedor			= Flag indicador para cargar la llave Publica o PublicaProveedor
+ * IN : canal		= El canal del header
+ * IN : aplicationId		= El aplicationId del header
+ * IN : dato		= El dato a encriptar
+ * INOUT : returnString		= Valor encriptado de salida
+ * INOUT : llaveSimetrica		= Llave encriptada
+ * INOUT : Environment		= Environment de referencia
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 26 JUNIO 2018
+**/
+CREATE PROCEDURE encriptarEntidad (IN nomServiceConfig CHARACTER, IN proveedor CHARACTER, IN canal CHARACTER, IN aplicationId CHARACTER, IN dato CHARACTER, INOUT returnString CHARACTER, INOUT llaveSimetrica CHARACTER, INOUT Environment REFERENCE)
+BEGIN
+	
+	DECLARE referencia REFERENCE TO Environment;
+	CALL diners.utilitarios.CargarServicioConfigurable(nomServiceConfig, referencia);
+	DECLARE propiedades REFERENCE TO Environment.cache.service.{nomServiceConfig};
+	
+	DECLARE keySymetric, keyPublic, valorProp1, valorProp2 CHARACTER;
+	SET valorProp1 = aplicationId || canal || 'SIMETRIC';
+	
+	IF proveedor <> 'P' THEN
+		SET valorProp2 = aplicationId || canal || 'PUBLIC';
+	ELSE
+		SET valorProp2 = aplicationId || canal || 'PUBLICPROVEEDOR';
+	END IF;
+	
+	SET keySymetric = propiedades.{valorProp1};
+	SET keyPublic = propiedades.{valorProp2};
+	
+	BEGIN
+	 DECLARE EXIT HANDLER FOR SQLSTATE LIKE'%' 
+   	 BEGIN 
+   		 SET returnString = '';
+   	 END;
+	 IF keySymetric <> '' THEN
+		 CALL EncrypLlavesProveedor(keySymetric,dato) INTO returnString;
+		 CALL getLlaveSimetrica(keyPublic,keySymetric) INTO llaveSimetrica;
+	 END IF;
+	END;
+	
+	IF returnString = '' OR (keySymetric = '' OR keySymetric = NULL) THEN
+		SET Environment.validarError = 3;
+		THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1235 VALUES ('Error al encriptar los datos', 'Error al encriptar los datos');
+	END IF;
+	
+END;
+
+
+/*
+ * Método para desencriptar de forma dinámica el cual llama a una función JAVA 
+ *
+ * Parameters:
+ * IN : nomServiceConfig  = nombre del Servicio Configurable a cargar
+ * IN : canal		= El canal del header
+ * IN : aplicationId		= El aplicationId del header
+ * IN : dato		= El dato a encriptar
+ * IN : llaveSimetrica		= Llave encriptada
+ * INOUT : Environment		= Environment de referencia
+ *
+ * Autor: Daniel Rocha 
+ * Fecha: 27 MAYO 2021
+**/
+CREATE PROCEDURE desencriptarBanca (IN nomServiceConfig CHARACTER, IN dato CHARACTER, INOUT Environment REFERENCE) RETURNS CHAR
+BEGIN
+	DECLARE returnString CHARACTER '';
+	
+	DECLARE referencia REFERENCE TO Environment;
+	CALL diners.utilitarios.CargarServicioConfigurable(nomServiceConfig, referencia);
+	DECLARE propiedades REFERENCE TO Environment.cache.service.{nomServiceConfig};
+	
+	DECLARE keySymetric, keyPrivate CHARACTER;
+	SET keySymetric = propiedades.BANCATCHINSIMETRIC;
+	SET keyPrivate = propiedades.BANCATCHINPRIVATE;
+	BEGIN
+	 DECLARE EXIT HANDLER FOR SQLSTATE LIKE'%' 
+   	 BEGIN 
+   		 SET returnString = '';
+   	 END;
+   	 
+   	 IF keySymetric <> '' THEN
+		CALL DecrypLlavesProveedor(dato,keyPrivate,keySymetric) INTO returnString;
+	 END IF;
+	END;
+	
+	IF returnString = '' OR (keySymetric = '' OR keySymetric = NULL) THEN
+		SET Environment.validarError = 3;
+		THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1235 VALUES ('Error al desencriptar los datos', 'Error al desencriptar los datos');
+	END IF;
+	
+	RETURN returnString;
+END;
+
+
+/*
+ * Método para desencriptar de forma dinámica el cual llama a una función JAVA 
+ *
+ * Parameters:
+ * IN : nomServiceConfig  = nombre del Servicio Configurable a cargar
+ * IN : canal		= El canal del header
+ * IN : aplicationId		= El aplicationId del header
+ * IN : dato		= El dato a encriptar
+ * IN : llaveSimetrica		= Llave encriptada
+ * INOUT : Environment		= Environment de referencia
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 26 JUNIO 2018
+**/
+CREATE PROCEDURE desencriptarEntidad (IN nomServiceConfig CHARACTER, IN canal CHARACTER, IN aplicationId CHARACTER, IN dato CHARACTER, IN llaveSimetrica CHARACTER, INOUT Environment REFERENCE) RETURNS CHAR
+BEGIN
+	DECLARE returnString CHARACTER '';
+	
+	DECLARE referencia REFERENCE TO Environment;
+	CALL diners.utilitarios.CargarServicioConfigurable(nomServiceConfig, referencia);
+	DECLARE propiedades REFERENCE TO Environment.cache.service.{nomServiceConfig};
+	
+	DECLARE keySymetric, valorProp CHARACTER;
+	SET valorProp = aplicationId || canal || 'PRIVATE';
+	SET keySymetric = propiedades.{valorProp};
+	
+	BEGIN
+	 DECLARE EXIT HANDLER FOR SQLSTATE LIKE'%' 
+   	 BEGIN 
+   		 SET returnString = '';
+   	 END;
+   	 
+   	 IF keySymetric <> '' THEN
+		CALL DecrypLlavesProveedor(dato,keySymetric,llaveSimetrica) INTO returnString;
+	 END IF;
+	END;
+	
+	IF returnString = '' OR (keySymetric = '' OR keySymetric = NULL) THEN
+		SET Environment.validarError = 3;
+		THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1235 VALUES ('Error al desencriptar los datos', 'Error al desencriptar los datos');
+	END IF;
+	
+	RETURN returnString;
+END;
+
+
+
+
+/*
+ * Método para encriptar con tripleDes el cual llama a una función JAVA 
+ *
+ * Parameters:
+ * IN : cryptoText  = Texto a encriptar
+ * IN : key			= Llave
+ * IN : vector		= vector
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 18 Abril 2017
+ *
+ */
+CREATE PROCEDURE encriptarDes (IN cryptoText CHAR,IN key CHAR, IN vector CHAR) RETURNS CHAR
+BEGIN
+	DECLARE returnString CHAR;
+	
+	CALL EncrypDecryptionDes(cryptoText,key,vector,'E') INTO returnString;
+	
+	IF returnString = '' THEN
+		THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1235 VALUES ('Error al encriptar los datos', 'Error al sencriptar los datos');
+	END IF;
+	
+	RETURN returnString;
+END;
+
+/*
+ * Método para desencriptar con tripleDes el cual llama a una función JAVA 
+ *
+ * Parameters:
+ * IN : cryptoText  = Texto a encriptar
+ * IN : key			= Llave
+ * IN : vector		= vector
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 18 Abril 2017
+ *
+ */
+CREATE PROCEDURE desencriptarDes (IN cryptoText CHAR,IN key CHAR, IN vector CHAR) RETURNS CHAR
+BEGIN
+	DECLARE returnString CHAR;
+	
+	CALL EncrypDecryptionDes(cryptoText,key,vector,'D') INTO returnString;
+	
+	IF returnString = '' THEN
+		THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1235 VALUES('Error al desencriptar los datos', 'Error al desencriptar los datos');
+	END IF;
+	
+	RETURN returnString;
+END;
+
+
+/*
+ * Método para encriptar valores en AES256, con llave y vector como parametros de entrada
+ *
+ * Parameters:
+ * IN : valor  = valor que se quiere encriptar
+ * IN : llave  = llave, se debe obtener de un servicio configurable
+ * IN : vector = Vector, se debe obtener de un servicio configurable
+ * OUT : returnString		= valor encriptado
+ *
+ * Autor: Alexis Padilla
+ * Fecha: 10082021
+**/
+CREATE PROCEDURE encriptarAES256BP (IN valor CHARACTER, IN llave CHARACTER, IN vector CHARACTER) RETURNS CHAR
+BEGIN
+	DECLARE returnString CHARACTER '';
+	
+	
+	BEGIN
+	 DECLARE EXIT HANDLER FOR SQLSTATE LIKE'%' 
+   	 BEGIN 
+   		 SET returnString = '';
+   	 END;
+   	 
+   	 CALL validaCampos (valor);
+   	 CALL validaCampos (llave);
+   	 CALL validaCampos (vector);
+   	 
+   	 CALL encriptaAES256Java(valor, llave, vector) INTO returnString;
+   	 
+	END;
+	
+	IF returnString = '' THEN 
+		
+		THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1235 VALUES ('Error al encriptar los datos', 'Error al encriptar los datos');
+	END IF;
+	
+	RETURN returnString;
+END;
+
+/*
+ * Método para encriptar valores en AES256, con llave y vector como parametros de entrada
+ *
+ * Parameters:
+ * IN : valor  = valor que se quiere encriptar
+ * IN : llave  = llave, se debe obtener de un servicio configurable
+ * IN : vector = Vector, se debe obtener de un servicio configurable
+ * OUT : returnString		= valor encriptado
+ *
+ * Autor: Alexis Padilla
+ * Fecha: 10082021
+**/
+CREATE PROCEDURE desencriptarAES256BP (IN valor CHARACTER, IN llave CHARACTER, IN vector CHARACTER) RETURNS CHAR
+BEGIN
+	DECLARE returnString CHARACTER '';
+	
+	
+	BEGIN
+	 DECLARE EXIT HANDLER FOR SQLSTATE LIKE'%' 
+   	 BEGIN 
+   		 SET returnString = '';
+   	 END;
+   	 
+   	 CALL validaCampos (valor);
+   	 CALL validaCampos (llave);
+   	 CALL validaCampos (vector);
+   	 
+   	 CALL desencriptaAES256Java(valor, llave, vector) INTO returnString;
+   	 
+	END;
+	
+	IF returnString = '' THEN 
+		
+		THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1235 VALUES ('Error al desencriptar los datos', 'Error al desencriptar los datos');
+	END IF;
+	
+	RETURN returnString;
+END;
+
+/*
+ * Método para validar campos
+ *
+ * Parameters:
+ * IN : valor  = valor que se quiere validar
+ * OUT : N/A
+ * EXCEPTION: Lanza excepción indicando campos en blanco
+ *
+ * Autor: Wuilmen Jimenez
+ * Fecha: 01102021
+**/
+CREATE PROCEDURE validaCampos (IN valor CHARACTER) 
+BEGIN
+  IF valor = '' OR valor IS NULL THEN
+   	 	THROW USER EXCEPTION CATALOG 'IIB' MESSAGE 1233 VALUES ('Error', 'Campos en blanco'); 
+  END IF;
+
+END;
+
+
+
+CREATE PROCEDURE encryptionJava (IN cryptoText CHAR, IN key CHAR, IN channel CHAR)
+	RETURNS CHAR
+	LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.util.Encriptacion.encryption";
+
+CREATE PROCEDURE decryptionJava (IN cryptoText CHAR, IN key CHAR, IN channel CHAR)
+	RETURNS CHAR
+	LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.util.Encriptacion.decryption";
+
+/*
+ * Función JAVA que encripta/desencripta un texto en tripleDes
+ *
+ * Parameters:
+ * IN : cryptoText  = Texto a encriptar
+ * IN : key			= Llave
+ * IN : vector		= vector
+ * IN : tipo		= 'E' Para encriptar y 'D' para desencriptar
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 18 Abril 2017
+ *
+ */
+CREATE PROCEDURE EncrypDecryptionDes (IN cryptoText CHAR, IN key CHAR, IN vector CHAR, IN tipo CHAR)
+	RETURNS CHAR
+	LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.util.Encriptacion.encripDesencriptTripleDes";
+
+/*
+ * Función JAVA que encripta un texto
+ *
+ * Parameters:
+ * IN : keySymetric  = Texto a encriptar
+ * IN : dato			= El dato que se va a encriptar
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 26 JUNIO 2018
+ *
+ */
+CREATE PROCEDURE EncrypLlavesProveedor (IN keySymetric CHARACTER, IN dato CHARACTER)
+	RETURNS CHAR
+	LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.util.Encriptacion.EncriptacionDatos";
+
+/*
+ * Función JAVA que encripta un texto
+ *
+ * Parameters:
+ * IN : keySymetric  = Texto a encriptar
+ * IN : dato			= El dato que se va a encriptar
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 26 JUNIO 2018
+ *
+ */
+CREATE PROCEDURE EncrypLlavesBanca (IN privateKey CHARACTER, IN symetricKey CHARACTER, IN dato CHARACTER)
+	RETURNS CHAR
+	LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.util.Encriptacion.EncriptacionDatosBanca";
+
+
+/*
+ * Función JAVA que desencripta un valor
+ *
+ * Parameters:
+ * IN : dato  = Texto a encriptar
+ * IN : idLlave			= Llave
+ * IN : keySymetric			= Llave simetrica
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 26 JUNIO 2018
+ *
+ */
+CREATE PROCEDURE DecrypLlavesProveedor (IN dato CHARACTER, IN idLlave CHARACTER, IN keySymetric CHARACTER)
+	RETURNS CHAR
+	LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.util.Encriptacion.DesencriptacionDatos";
+
+
+/*
+ * Función JAVA que encripta la llave simetrica
+ *
+ * Parameters:
+ * IN : keyPublic  = Texto a encriptar
+ * IN : simetrica			= Llave
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 26 JUNIO 2018
+ *
+ */
+CREATE PROCEDURE getLlaveSimetrica (IN keyPublic CHARACTER, IN simetrica CHARACTER)
+	RETURNS CHAR
+	LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.util.Encriptacion.encriptarLlaveSimetrica";
+
+
+/*
+ * Función JAVA que devuelve una llave aleatoria
+ *
+ * Parameters:
+ * IN : keyPublic  = Texto a encriptar
+ * IN : simetrica			= Llave
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 26 JUNIO 2018
+ *
+ */
+CREATE PROCEDURE genLlaveSimetrica (IN length INTEGER)
+	RETURNS CHAR
+	LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.util.Encriptacion.generarLlaveSimetrica";
+
+
+/*
+ * Función JAVA que encripta en AES256 con llave y vector
+ *
+ * Parameters:
+ * IN : valor  = Texto a encriptar
+ * IN : key			= Llave
+ * IN : iv			= Vector
+ *
+ * Autor: Javier Mejia 
+ * Fecha: 26 JUNIO 2018
+ *
+ */
+CREATE PROCEDURE encriptaAES256Java (IN valor CHAR, IN key CHAR, IN iv CHAR)
+	RETURNS CHAR
+	LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.util.Encriptacion.encriptaAES256";
+
+/*
+ * Función JAVA que desencripta en AES256 con llave y vector
+ *
+ * Parameters:
+ * IN : valor  = Texto a encriptar
+ * IN : key	   = Llave
+ * IN : iv	   = Vector
+ *
+ * Autor: JAVIER MEJIA 
+ * Fecha: 26 JUNIO 2018
+ *
+ */
+CREATE PROCEDURE desencriptaAES256Java (IN valor CHAR, IN key CHAR, IN iv CHAR)
+	RETURNS CHAR
+	LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.util.Encriptacion.desencriptaAES256";

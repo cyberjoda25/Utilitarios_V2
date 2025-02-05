@@ -1,0 +1,777 @@
+BROKER SCHEMA diners.logs
+/*
+* Procesa la entrada del servicio SOAP
+*
+* Se inician las variables del sistema,
+* guardando en el árbol Environment el header y la entrada y creando una carpeta para la salida.
+*
+*/
+
+DECLARE espacio CHAR CAST(X'0A' AS CHAR CCSID 1208);
+CREATE COMPUTE MODULE IniciarConfLogs
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+		DECLARE nomServ CHARACTER;
+		--Obtener variables de configuración del servicio
+		SET Environment.DatosServicio.ipHost = OutputRoot.HTTPInputHeader."X-Server-Name";
+		SET Environment.DatosServicio.portHost = OutputRoot.HTTPInputHeader."X-Server-Port";
+
+		IF FIELDTYPE(OutputRoot.SOAP) IS NOT NULL THEN
+			SET nomServ = OutputRoot.SOAP.Context.service;
+			SET Environment.DatosServicio.tipoServicio = 'SOAP';
+		ELSE
+			IF FIELDTYPE(OutputLocalEnvironment.SOAP.Input.Message.Context.service) IS NOT NULL THEN
+				SET nomServ = OutputLocalEnvironment.SOAP.Input.Message.Context.service;
+				SET Environment.DatosServicio.tipoServicio = 'XMLNSC';
+			END IF;
+		END IF;
+
+		IF Environment.DatosServicio.tipoServicio = 'SOAP' THEN
+			SET Environment.DatosServicio.namespace = OutputRoot.SOAP.Context.portTypeNamespace;
+			-- Iniciar variables del sistema
+			SET Environment.DatosServicio.nombreServicio = OutputRoot.SOAP.Context.service;
+			SET Environment.DatosServicio.operacion = OutputRoot.SOAP.Context.operation;
+			--Obtener namespace del Header y Body
+			SET Environment.DatosServicio.nsHeader = FIELDNAMESPACE(InputRoot.SOAP.Header.[<]);
+			SET Environment.DatosServicio.nsBody = FIELDNAMESPACE(InputRoot.SOAP.Body.[<]);
+			--Valida el mensaje de entrada copiando las entradas que son necesarias
+			CALL validarMensajeSOAP();
+			--Copiar el header y body en el Environment
+			CREATE LASTCHILD OF Environment.Logs.EntradaSoap NAME 'entrada';
+
+			IF FIELDTYPE(InputRoot.SOAP.Header) IS NOT NULL THEN
+				CREATE LASTCHILD OF Environment.Logs.EntradaSoap.entrada NAME FIELDNAME(InputRoot.SOAP.Header);
+				DECLARE datosArbol REFERENCE TO Environment.Logs.EntradaSoap.entrada.[<];
+				DECLARE element1 REFERENCE TO InputRoot.SOAP.Header;
+				CALL crearArbol(element1, datosArbol);
+
+				SET Environment.DatosServicio.uuidWS = FIELDVALUE(Environment.Header.{Environment.DatosServicio.nsHeader}:dinHeader.{Environment.DatosServicio.nsHeader}:uuid);
+			END IF;
+
+			IF FIELDTYPE(InputRoot.SOAP.Body) IS NOT NULL THEN
+				CREATE LASTCHILD OF Environment.Logs.EntradaSoap.entrada NAME FIELDNAME(InputRoot.SOAP.Body);
+				DECLARE datosArbol2 REFERENCE TO Environment.Logs.EntradaSoap.entrada.[<];
+				DECLARE element2 REFERENCE TO InputRoot.SOAP.Body;
+				CALL crearArbol(element2, datosArbol2);
+			END IF;
+
+			CREATE LASTCHILD OF Environment.Logs NAME 'SalidaSoap';
+		ELSE
+			IF Environment.DatosServicio.tipoServicio = 'XMLNSC' THEN
+				SET Environment.DatosServicio.namespace = OutputRoot.SOAP.Context.portTypeNamespace;
+				-- Iniciar variables del sistema
+				SET Environment.DatosServicio.nombreServicio = OutputLocalEnvironment.SOAP.Input.Message.Context.service;
+				SET Environment.DatosServicio.operacion = OutputLocalEnvironment.SOAP.Input.Message.Context.operation;
+				--Obtener namespace del Header y Body
+				SET Environment.DatosServicio.nsHeader = FIELDNAMESPACE(OutputLocalEnvironment.SOAP.Input.Message.Header.[<]);
+				SET Environment.DatosServicio.nsBody = FIELDNAMESPACE(InputRoot.XMLNSC.[<]);
+				--Valida el mensaje de entrada copiando las entradas que son necesarias
+				CALL validarMensajeXMLNSC();
+				--Copiar el header y body en el Environment
+				CREATE LASTCHILD OF Environment.Logs.EntradaSoap NAME 'entrada';
+
+				IF FIELDTYPE(OutputLocalEnvironment.SOAP.Input.Message.Header) IS NOT NULL THEN
+					CREATE LASTCHILD OF Environment.Logs.EntradaSoap.entrada NAME FIELDNAME(OutputLocalEnvironment.SOAP.Input.Message.Header);
+					DECLARE datosArbol REFERENCE TO Environment.Logs.EntradaSoap.entrada.[<];
+					DECLARE element1 REFERENCE TO OutputLocalEnvironment.SOAP.Input.Message.Header;
+					CALL crearArbol(element1, datosArbol);
+
+					SET Environment.DatosServicio.uuidWS = FIELDVALUE(Environment.Header.{Environment.DatosServicio.nsHeader}:dinHeader.{Environment.DatosServicio.nsHeader}:uuid);
+				END IF;
+
+				IF FIELDTYPE(InputRoot.XMLNSC.[<]) IS NOT NULL THEN
+					CREATE LASTCHILD OF Environment.Logs.EntradaSoap.entrada NAME FIELDNAME(InputRoot.XMLNSC.[<]);
+					DECLARE datosArbol2 REFERENCE TO Environment.Logs.EntradaSoap.entrada.[<];
+					DECLARE element2 REFERENCE TO OutputRoot.XMLNSC.[<];
+					CALL crearArbol(element2, datosArbol2);
+				END IF;
+
+				CREATE LASTCHILD OF Environment.Logs NAME 'SalidaSoap';
+			ELSE
+				-- En caso de una estructura del árbol errónea iniciar variables del sistema
+				SET Environment.DatosServicio.nombreServicio = 'Error_Service';
+				SET Environment.DatosServicio.operacion = OutputLocalEnvironment.Destination.RouterList.DestinationData.labelName;
+			END IF;
+		END IF;
+
+		SET Environment.DatosServicio.fechaPeticion = diners.utilitarios.obtenerFecha();
+
+		RETURN TRUE;
+	END;
+	
+	/*
+	* Copia el Árbol SOAP de entrada a un nuevo Árbol, copiando Гєnicamente el Header.dinHeader y
+	* el Body con todos sus namespace.
+	* Valida el Árbol del header utilizando la función MappingHeader
+	*
+	*/
+	CREATE PROCEDURE validarMensajeSOAP ()
+	BEGIN
+		CREATE LASTCHILD OF Environment.Body DOMAIN('XMLNSC') NAMESPACE FIELDVALUE(Environment.DatosServicio.nsBody) NAME FIELDNAME(InputRoot.SOAP.Body.[<]);
+		--Respaldar el mensaje de entrada
+		SET Environment.Header = InputRoot.SOAP.Header;
+		SET Environment.Body.[<] = InputRoot.SOAP.Body.[<];
+		--Borrar el mensaje de entrada
+		SET OutputRoot.SOAP.Header = NULL;
+		SET OutputRoot.SOAP.Body = NULL;
+
+		IF FIELDTYPE(Environment.Header.[<]) IS NOT NULL THEN
+			CREATE LASTCHILD OF OutputLocalEnvironment.Variables.Header NAMESPACE FIELDVALUE(Environment.DatosServicio.nsHeader) NAME 'dinHeader';
+			SET OutputLocalEnvironment.Variables.Header.{Environment.DatosServicio.nsHeader}:dinHeader = Environment.Header.{Environment.DatosServicio.nsHeader}:dinHeader;
+
+			DECLARE headerCall REFERENCE TO OutputLocalEnvironment.Variables.Header;
+
+			CALL MappingHeader(headerCall, 1);
+			SET OutputRoot.SOAP.Header.{Environment.DatosServicio.nsHeader}:dinHeader = headerCall.{Environment.DatosServicio.nsHeader}:dinHeader;
+		END IF;
+
+		SET Environment.Header = NULL;
+		SET Environment.Header = OutputRoot.SOAP.Header;
+
+		CREATE LASTCHILD OF OutputRoot.SOAP.Body DOMAIN('XMLNSC') NAMESPACE FIELDVALUE(Environment.DatosServicio.nsBody) NAME FIELDNAME(InputRoot.SOAP.Body.[<]);
+		SET OutputRoot.SOAP.Body.[<] = Environment.Body.[<];
+	END;
+	
+	/*
+	* Copia el Árbol tipo XMLNSC de entrada a un nuevo Árbol, copiando Гєnicamente el Header.dinHeader y
+	* el Body con todos sus namespace.
+	* Valida el Árbol del header utilizando la función MappingHeader
+	*
+	*/
+	CREATE PROCEDURE validarMensajeXMLNSC ()
+	BEGIN
+		CREATE LASTCHILD OF Environment.Body DOMAIN('XMLNSC') NAMESPACE FIELDVALUE(Environment.DatosServicio.nsBody) NAME FIELDNAME(InputRoot.XMLNSC.[<]);
+		--Respaldar el mensaje de entrada
+		SET Environment.Header = OutputLocalEnvironment.SOAP.Input.Message.Header;
+		SET Environment.Body.[<] = InputRoot.XMLNSC.[<];
+		--Borrar el mensaje de entrada
+		SET InputLocalEnvironment.SOAP.Input.Message.Header = NULL;
+		SET OutputRoot.XMLNSC = NULL;
+
+		IF FIELDTYPE(Environment.Header.[<]) IS NOT NULL THEN
+			CREATE LASTCHILD OF OutputLocalEnvironment.Variables.Header NAMESPACE FIELDVALUE(Environment.DatosServicio.nsHeader) NAME 'dinHeader';
+			SET OutputLocalEnvironment.Variables.Header.{Environment.DatosServicio.nsHeader}:dinHeader = Environment.Header.{Environment.DatosServicio.nsHeader}:dinHeader;
+
+			DECLARE headerCall REFERENCE TO OutputLocalEnvironment.Variables.Header;
+
+			CALL MappingHeader(headerCall, 1);
+			SET InputLocalEnvironment.SOAP.Input.Message.Header.{Environment.DatosServicio.nsHeader}:dinHeader = headerCall.{Environment.DatosServicio.nsHeader}:dinHeader;
+		END IF;
+
+		SET Environment.Header = NULL;
+		SET Environment.Header = InputLocalEnvironment.SOAP.Input.Message.Header;
+
+		CREATE LASTCHILD OF OutputRoot.XMLNSC DOMAIN('XMLNSC') NAMESPACE FIELDVALUE(Environment.DatosServicio.nsBody) NAME FIELDNAME(InputRoot.XMLNSC.[<]);
+		SET OutputRoot.XMLNSC.[<] = Environment.Body.[<];
+	END;
+
+	CREATE PROCEDURE MappingHeader(INOUT rootHeader REFERENCE, IN totalPag INTEGER)
+	BEGIN
+		DECLARE nsh NAMESPACE 'http://www.dinersclub.com.ec/2016/DinHeader';
+		DECLARE J INTEGER;
+		DECLARE I INTEGER 1;
+		DECLARE K INTEGER 1;
+		DECLARE childs INTEGER;
+		SET J = CARDINALITY(rootHeader.[1].*[]);
+		WHILE I <= J DO
+			SET childs = CARDINALITY(rootHeader.[1].[I].*[]);
+			IF childs > 0 THEN
+				WHILE K < childs DO
+					IF (CAST(rootHeader.[1].[I].[K] AS CHARACTER) LIKE '%http:%') THEN
+						DELETE FIELD rootHeader.[1].[I].[K];
+					END IF;
+					SET K = K + 1;
+				END WHILE;
+			END IF;
+			IF (CAST(rootHeader.[1].[I] AS CHARACTER) LIKE '%http:%') THEN
+				DELETE FIELD rootHeader.[1].[I];
+			END IF;
+			SET I = I + 1;
+		END WHILE;
+
+		SET rootHeader.nsh:dinHeader.nsh:horaTransaccion = CURRENT_TIMESTAMP;
+	END;
+
+END MODULE;
+
+
+/*
+* Procesa la entrada del servicio REST
+*
+* Se inician las variables del sistema,
+* guardando en el árbol Environment el header y la entrada y creando una carpeta para la salida.
+*
+*/
+CREATE COMPUTE MODULE IniciarConfLogsRest
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+		DECLARE nomServ CHARACTER;
+		--Obtener variables de configuración del servicio
+		SET Environment.DatosServicio.ipHost = OutputRoot.HTTPInputHeader."X-Server-Name";
+		SET Environment.DatosServicio.portHost = OutputRoot.HTTPInputHeader."X-Server-Port";
+		SET Environment.DatosServicio.tipoServicio = 'REST';
+
+		IF Environment.DatosServicio.tipoServicio = 'REST' THEN
+			SET Environment.DatosServicio.namespace = '';
+			-- Iniciar variables del sistema
+			SET Environment.DatosServicio.nombreServicio = InputLocalEnvironment.HTTP.Input.Path.[>];
+			SET Environment.DatosServicio.operacion = InputLocalEnvironment.HTTP.Input.Path.[<];
+			--Obtener namespace del Header y Body
+			
+			--Valida el mensaje de entrada copiando las entradas que son necesarias
+			CALL validarMensajeJSON();
+			--Copiar el header y body en el Environment
+			CREATE LASTCHILD OF Environment.Logs.EntradaRest NAME 'entrada';
+			IF FIELDTYPE(Environment.Header) IS NOT NULL THEN
+				CREATE LASTCHILD OF Environment.Logs.EntradaRest.entrada NAME FIELDNAME(Environment.Header);
+				DECLARE datosArbol REFERENCE TO Environment.Logs.EntradaRest.entrada.[<];
+				DECLARE element1 REFERENCE TO Environment.Header;
+				CALL crearArbol(element1, datosArbol);
+				SET Environment.DatosServicio.uuidWS = FIELDVALUE(Environment.Header.uuid);
+			END IF;
+
+			IF FIELDTYPE(Environment.Body) IS NOT NULL THEN
+				CREATE LASTCHILD OF Environment.Logs.EntradaRest.entrada NAME FIELDNAME(InputRoot.JSON.Data.[<]);
+				DECLARE datosArbol2 REFERENCE TO Environment.Logs.EntradaRest.entrada.[<];
+				DECLARE element2 REFERENCE TO OutputRoot.JSON.Data.[<];
+				CALL crearArbol(element2, datosArbol2);
+			END IF;			
+			CREATE LASTCHILD OF Environment.Logs NAME 'SalidaRest';
+		ELSE
+				-- En caso de una estructura del árbol errónea iniciar variables del sistema
+				SET Environment.DatosServicio.nombreServicio = 'Error_Service';
+				SET Environment.DatosServicio.operacion = OutputLocalEnvironment.Destination.RouterList.DestinationData.labelName;
+		END IF;
+		SET OutputLocalEnvironment.Destination.RouterList.DestinationData[1].labelName = Environment.DatosServicio.operacion;
+		SET Environment.DatosServicio.fechaPeticion = diners.utilitarios.obtenerFecha();
+
+		RETURN TRUE;
+	END;
+	
+	/*
+	* Copia el Árbol tipo JSON de entrada a un nuevo Árbol, copiando Гєnicamente el Header.dinHeader y
+	* el Body.
+	* Valida el Árbol del header utilizando la función MappingHeader
+	*
+	*/
+	CREATE PROCEDURE validarMensajeJSON ()
+	BEGIN
+		SET Environment.a = 1;
+		CREATE LASTCHILD OF Environment.Body DOMAIN('JSON') NAME FIELDNAME(InputRoot.JSON.Data.[<]);
+		--Respaldar el mensaje de entrada
+		SET Environment.Header = InputRoot.JSON.Data.[>];
+		SET Environment.Body = InputRoot.JSON.Data.[<];
+		--Borrar el mensaje de entrada
+		-- SET InputLocalEnvironment.SOAP.Input.Message.Header = NULL;
+		SET OutputRoot.XMLNSC = NULL;
+
+		IF FIELDTYPE(Environment.Header.[<]) IS NOT NULL THEN
+			--CREATE LASTCHILD OF OutputLocalEnvironment.Variables.Header NAME 'dinHeader';
+			--SET OutputLocalEnvironment.Variables.Header.{Environment.DatosServicio.nsHeader}:dinHeader = Environment.Header.{Environment.DatosServicio.nsHeader}:dinHeader;
+			--SET OutputLocalEnvironment.Variables.Header = Environment.Header;
+			DECLARE headerCall REFERENCE TO Environment.Header;
+
+			CALL MappingHeaderJSON(headerCall, 1);
+			-- SET InputLocalEnvironment.SOAP.Input.Message.Header.dinHeader = headerCall.dinHeader;
+		END IF;
+
+		-- SET Environment.Header = OutputLocalEnvironment.Variables.Header.dinHeader;
+
+		-- CREATE LASTCHILD OF OutputRoot.JSON.Data DOMAIN('JSON') NAME FIELDNAME(InputRoot.JSON.Data.[<]);
+		SET OutputRoot.JSON.Data.[<] = Environment.Body;
+	END;
+
+	
+	
+	CREATE PROCEDURE MappingHeaderJSON(INOUT rootHeader REFERENCE, IN totalPag INTEGER)
+	BEGIN
+		DECLARE J INTEGER;
+		DECLARE I INTEGER 1;
+		DECLARE K INTEGER 1;
+		DECLARE childs INTEGER;
+		SET J = CARDINALITY(rootHeader.[1].*[]);
+		WHILE I <= J DO
+			SET childs = CARDINALITY(rootHeader.[1].[I].*[]);
+			IF childs > 0 THEN
+				WHILE K < childs DO
+					IF (CAST(rootHeader.[1].[I].[K] AS CHARACTER) LIKE '%http:%') THEN
+						DELETE FIELD rootHeader.[1].[I].[K];
+					END IF;
+					SET K = K + 1;
+				END WHILE;
+			END IF;
+			IF (CAST(rootHeader.[1].[I] AS CHARACTER) LIKE '%http:%') THEN
+				DELETE FIELD rootHeader.[1].[I];
+			END IF;
+			SET I = I + 1;
+		END WHILE;
+
+		SET rootHeader.horaTransaccion = CURRENT_TIMESTAMP;
+	END;
+
+END MODULE;
+
+/*
+* Procesa la entrada del servicio REST en forma de Proxy
+*
+* Se inician las variables del sistema,
+* guardando en el árbol Environment el header y la entrada y creando una carpeta para la salida.
+*
+*/
+CREATE COMPUTE MODULE IniciarConfLogsProxy
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+		DECLARE nomServ CHARACTER;
+		--Obtener variables de configuración del servicio
+		SET Environment.DatosServicio.ipHost = OutputRoot.HTTPInputHeader."X-Server-Name";
+		SET Environment.DatosServicio.portHost = OutputRoot.HTTPInputHeader."X-Server-Port";
+		SET Environment.DatosServicio.tipoServicio = 'REST';
+
+		IF Environment.DatosServicio.tipoServicio = 'REST' THEN
+			SET Environment.DatosServicio.namespace = '';
+			-- Iniciar variables del sistema
+			SET Environment.DatosServicio.nombreServicio = InputLocalEnvironment.HTTP.Input.Path.[>];
+			SET Environment.DatosServicio.operacion = InputLocalEnvironment.HTTP.Input.Path.[<];
+			--Copiar el header y body en el Environment
+			CREATE LASTCHILD OF Environment.Logs.EntradaRest NAME 'entrada';
+			IF FIELDTYPE(Environment.Header) IS NOT NULL THEN
+				CREATE LASTCHILD OF Environment.Logs.EntradaRest.entrada NAME FIELDNAME(Environment.Header);
+				DECLARE datosArbol REFERENCE TO Environment.Logs.EntradaRest.entrada.[<];
+				DECLARE element1 REFERENCE TO Environment.Header;
+				CALL crearArbol(element1, datosArbol);
+				SET Environment.DatosServicio.uuidWS = FIELDVALUE(Environment.Header.uuid);
+			END IF;
+
+			IF FIELDTYPE(Environment.Body) IS NOT NULL THEN
+				CREATE LASTCHILD OF Environment.Logs.EntradaRest.entrada NAME FIELDNAME(InputRoot.JSON.Data.[<]);
+				DECLARE datosArbol2 REFERENCE TO Environment.Logs.EntradaRest.entrada.[<];
+				DECLARE element2 REFERENCE TO OutputRoot.JSON.Data.[<];
+				CALL crearArbol(element2, datosArbol2);
+			END IF;			
+			CREATE LASTCHILD OF Environment.Logs NAME 'SalidaRest';
+		ELSE
+				-- En caso de una estructura del árbol errónea iniciar variables del sistema
+				SET Environment.DatosServicio.nombreServicio = 'Error_Service';
+				SET Environment.DatosServicio.operacion = OutputLocalEnvironment.Destination.RouterList.DestinationData.labelName;
+		END IF;
+		SET OutputLocalEnvironment.Destination.RouterList.DestinationData[1].labelName = Environment.DatosServicio.operacion;
+		SET Environment.DatosServicio.fechaPeticion = diners.utilitarios.obtenerFecha();
+
+		RETURN TRUE;
+	END;
+
+END MODULE;
+
+
+/*
+* Convierte el arbol guardado en el inicio del flujo a blob y posteriormente a cadena
+* invoca a la funcion imprimirLogsJava con la cadena de texto generada.
+*
+*/
+CREATE COMPUTE MODULE FinalizarConfLogs
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+
+		DECLARE nombServicio,nombOperacion,port,ip_Server,Cola,GestorColas CHARACTER;
+		DECLARE imprimirLogs CHARACTER;
+
+		SET nombServicio = Environment.DatosServicio.nombreServicio;
+		SET nombOperacion = Environment.DatosServicio.operacion;
+		SET ip_Server = Environment.DatosServicio.ipHost;
+		SET port = Environment.DatosServicio.portHost;
+		
+		--Obtener informacion de la base de datos parametros generales sobre el QUEUE
+		CALL getParamConfig(nombServicio,nombOperacion,imprimirLogs);
+
+		IF InputLocalEnvironment.Variables.BDLOGCONFIG.imprimirLogToFileBD <> '0' THEN
+			IF nombServicio IS NULL THEN
+				SET nombServicio = 'Error_Service';
+			END IF;
+
+			IF nombOperacion IS NULL THEN
+				SET nombOperacion = Environment.operacion;
+			END IF;
+
+			IF nombOperacion IS NULL THEN
+				SET nombOperacion = 'Error_Operacion';
+			END IF;
+
+			IF port IS NULL THEN
+				IF FIELDTYPE(OutputRoot.HTTPInputHeader) IS NOT NULL THEN
+					SET port = OutputRoot.HTTPInputHeader."X-Server-Port";
+				ELSE
+					SET port = '7800';
+				END IF;
+			END IF;
+			--Crear la carpeta para la salida del Soap copiando el header y body del mensaje
+			CREATE LASTCHILD OF Environment.Logs.SalidaSoap NAME 'salida';
+
+			IF FIELDTYPE(InputRoot.SOAP.Header) IS NOT NULL THEN
+				CREATE LASTCHILD OF Environment.Logs.SalidaSoap.salida NAME FIELDNAME(InputRoot.SOAP.Header);
+				DECLARE datosArbol REFERENCE TO Environment.Logs.SalidaSoap.salida.[<];
+				DECLARE element1 REFERENCE TO InputRoot.SOAP.Header;
+				CALL crearArbol(element1, datosArbol);
+			END IF;
+
+			IF FIELDTYPE(InputRoot.SOAP.Body.[<]) IS NOT NULL THEN
+				CREATE LASTCHILD OF Environment.Logs.SalidaSoap.salida NAME FIELDNAME(InputRoot.SOAP.Body);
+				DECLARE datosArbol2 REFERENCE TO Environment.Logs.SalidaSoap.salida.[<];
+				DECLARE element2 REFERENCE TO InputRoot.SOAP.Body;
+				CALL crearArbol(element2, datosArbol2);
+			END IF;
+			
+			--Crear una carpeta con el nombre del servicio
+			CREATE LASTCHILD OF OutputLocalEnvironment.blob.Envelope DOMAIN('XMLNSC') NAME 'tramaLogs';
+			
+			--Colocar la trama de configuracion al arbol
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.ipHost = ip_Server;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.portHost = port;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.nombreServicio = nombServicio;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.operacion = nombOperacion;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.fechaIni = Environment.DatosServicio.fechaPeticion;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.fechaFin = diners.utilitarios.obtenerFecha();
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.ConfigBD.flagImprimirLogToFileBD =InputLocalEnvironment.Variables.BDLOGCONFIG.imprimirLogToFileBD;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.ConfigBD.descError=InputLocalEnvironment.Variables.BDLOGCONFIG.descError;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.ConfigBD.descExitoso=InputLocalEnvironment.Variables.BDLOGCONFIG.descExitoso;
+			
+			--Colocar la trama de entrada, salida y proveedores al arbol
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Entrada = Environment.Logs.EntradaSoap.[<];
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Proveedor = Environment.Logs.Proveedor;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Salida = Environment.Logs.SalidaSoap.[<];
+
+			DECLARE bodyIn REFERENCE TO OutputLocalEnvironment.blob.Envelope;
+			SET Environment.Variables.Envelope = bodyIn;
+			SET Environment.Variables.BLOB = ASBITSTREAM(Environment.Variables.Envelope OPTIONS FolderBitStream CCSID 1208);
+			
+			--Utilizar la conversion con pagina de codigo 1208, 819
+			DECLARE requestChar CHAR CAST(Environment.Variables.BLOB AS CHARACTER CCSID 819);
+			
+			--Enviar a guardar el mensaje en la cola
+			IF InputLocalEnvironment.Variables.BDLOGCONFIG.nomGestorColas <> '' OR InputLocalEnvironment.Variables.BDLOGCONFIG.nomGestorColas <> NULL OR
+				InputLocalEnvironment.Variables.BDLOGCONFIG.nomCola <> '' OR InputLocalEnvironment.Variables.BDLOGCONFIG.nomCola <> NULL THEN
+				DECLARE codError CHARACTER;
+				DECLARE referencia REFERENCE TO InputLocalEnvironment.Variables.BDLOGCONFIG;
+
+				SET codError = DepositarMensajeACola(requestChar, referencia);
+			END IF;
+		END IF;
+		
+		-- Borrar los datos
+		SET Environment.blob = NULL;
+		SET Environment.Variables = NULL;
+
+		RETURN TRUE;
+	END;
+
+
+	CREATE PROCEDURE getParamConfig(IN nomServicio CHARACTER, IN nomOperacion CHARACTER, OUT imprimirLogs CHARACTER)
+	BEGIN
+		DECLARE logsParametros REFERENCE TO OutputLocalEnvironment;
+		CAll cargarConfiguracionLogParametros (logsParametros);
+
+		CREATE LASTCHILD OF InputLocalEnvironment.Variables DOMAIN('XMLNSC') NAME 'BDLOGCONFIG';
+		SET InputLocalEnvironment.Variables.BDLOGCONFIG.nomServicio = nomServicio || '/' || nomOperacion;
+
+		FOR source AS OutputLocalEnvironment.BDLOGCONFIG.respuesta[] DO
+			IF source.PROPIEDAD = 'NAMEQMANAGER' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.nomGestorColas = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'QUEUE_LOGS' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.nomCola = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'SERVIDOR_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.servidorMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'CANAL_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.canalMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'PUERTO_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.portMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'USER_ID_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.userIdMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'PASSWORD_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.passMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'IMPRIMIR_FILE_BD' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.imprimirLogToFileBD = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'DESC_ERROR' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.descError = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'DESC_EXITOSO' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.descExitoso = TRIM(source.VALOR);
+			END IF;
+		END FOR;
+
+	END;
+END MODULE;
+
+
+/*
+* Convierte el arbol guardado en el inicio del flujo a blob y posteriormente a cadena
+* invoca a la funcion imprimirLogsJava con la cadena de texto generada.
+*
+*/
+CREATE COMPUTE MODULE FinalizarConfLogsRest
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+
+		DECLARE nombServicio,nombOperacion,port,ip_Server,Cola,GestorColas CHARACTER;
+		DECLARE imprimirLogs CHARACTER;
+
+		SET nombServicio = Environment.DatosServicio.nombreServicio;
+		SET nombOperacion = Environment.DatosServicio.operacion;
+		SET ip_Server = Environment.DatosServicio.ipHost;
+		SET port = Environment.DatosServicio.portHost;
+		
+		--Obtener informacion de la base de datos parametros generales sobre el QUEUE
+		CALL getParamConfig(nombServicio,nombOperacion,imprimirLogs);
+
+		IF InputLocalEnvironment.Variables.BDLOGCONFIG.imprimirLogToFileBD <> '0' THEN
+			IF nombServicio IS NULL THEN
+				SET nombServicio = 'Error_Service';
+			END IF;
+
+			IF nombOperacion IS NULL THEN
+				SET nombOperacion = Environment.operacion;
+			END IF;
+
+			IF nombOperacion IS NULL THEN
+				SET nombOperacion = 'Error_Operacion';
+			END IF;
+
+			IF port IS NULL THEN
+				IF FIELDTYPE(OutputRoot.HTTPInputHeader) IS NOT NULL THEN
+					SET port = OutputRoot.HTTPInputHeader."X-Server-Port";
+				ELSE
+					SET port = '7800';
+				END IF;
+			END IF;
+			--Crear la carpeta para la salida del Soap copiando el header y body del mensaje
+			CREATE LASTCHILD OF Environment.Logs.SalidaRest NAME 'salida';
+
+			IF FIELDTYPE(InputRoot.JSON.Data.Header) IS NOT NULL THEN
+				CREATE LASTCHILD OF Environment.Logs.SalidaRest.salida NAME FIELDNAME(InputRoot.JSON.Data.Header);
+				DECLARE datosArbol REFERENCE TO Environment.Logs.SalidaRest.salida.[<];
+				DECLARE element1 REFERENCE TO InputRoot.SOAP.Header;
+				CALL crearArbol(element1, datosArbol);
+			END IF;
+
+			IF FIELDTYPE(InputRoot.JSON.Data.[<]) IS NOT NULL THEN
+				CREATE LASTCHILD OF Environment.Logs.SalidaRest.salida NAME FIELDNAME(InputRoot.JSON.Data);
+				DECLARE datosArbol2 REFERENCE TO Environment.Logs.SalidaRest.salida.[<];
+				DECLARE element2 REFERENCE TO InputRoot.JSON.Data;
+				CALL crearArbol(element2, datosArbol2);
+			END IF;
+			
+			--Crear una carpeta con el nombre del servicio
+			CREATE LASTCHILD OF OutputLocalEnvironment.blob.Envelope DOMAIN('XMLNSC') NAME 'tramaLogs';
+			
+			--Colocar la trama de configuracion al arbol
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.ipHost = ip_Server;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.portHost = port;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.nombreServicio = nombServicio;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.operacion = nombOperacion;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.fechaIni = Environment.DatosServicio.fechaPeticion;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Config.fechaFin = diners.utilitarios.obtenerFecha();
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.ConfigBD.flagImprimirLogToFileBD =InputLocalEnvironment.Variables.BDLOGCONFIG.imprimirLogToFileBD;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.ConfigBD.descError=InputLocalEnvironment.Variables.BDLOGCONFIG.descError;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.ConfigBD.descExitoso=InputLocalEnvironment.Variables.BDLOGCONFIG.descExitoso;
+			
+			--Colocar la trama de entrada, salida y proveedores al arbol
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Entrada = Environment.Logs.EntradaRest.[<];
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Proveedor = Environment.Logs.Proveedor;
+			SET OutputLocalEnvironment.blob.Envelope.tramaLogs.Salida = Environment.Logs.SalidaRest.[<];
+
+			DECLARE bodyIn REFERENCE TO OutputLocalEnvironment.blob.Envelope;
+			SET Environment.Variables.Envelope = bodyIn;
+			SET Environment.Variables.BLOB = ASBITSTREAM(Environment.Variables.Envelope OPTIONS FolderBitStream CCSID 1208);
+			
+			--Utilizar la conversion con pagina de codigo 1208, 819
+			DECLARE requestChar CHAR CAST(Environment.Variables.BLOB AS CHARACTER CCSID 819);
+			
+			--Enviar a guardar el mensaje en la cola
+			IF InputLocalEnvironment.Variables.BDLOGCONFIG.nomGestorColas <> '' OR InputLocalEnvironment.Variables.BDLOGCONFIG.nomGestorColas <> NULL OR
+				InputLocalEnvironment.Variables.BDLOGCONFIG.nomCola <> '' OR InputLocalEnvironment.Variables.BDLOGCONFIG.nomCola <> NULL THEN
+				DECLARE codError CHARACTER;
+				DECLARE referencia REFERENCE TO InputLocalEnvironment.Variables.BDLOGCONFIG;
+
+				SET codError = DepositarMensajeACola(requestChar, referencia);
+			END IF;
+		END IF;
+		
+		-- Borrar los datos
+		SET Environment.blob = NULL;
+		SET Environment.Variables = NULL;
+
+		RETURN TRUE;
+	END;
+	
+	CREATE PROCEDURE getParamConfig(IN nomServicio CHARACTER, IN nomOperacion CHARACTER, OUT imprimirLogs CHARACTER)
+	BEGIN
+		DECLARE logsParametros REFERENCE TO OutputLocalEnvironment;
+		CAll cargarConfiguracionLogParametros (logsParametros);
+
+		CREATE LASTCHILD OF InputLocalEnvironment.Variables DOMAIN('XMLNSC') NAME 'BDLOGCONFIG';
+		SET InputLocalEnvironment.Variables.BDLOGCONFIG.nomServicio = nomServicio || '/' || nomOperacion;
+
+		FOR source AS OutputLocalEnvironment.BDLOGCONFIG.respuesta[] DO
+			IF source.PROPIEDAD = 'NAMEQMANAGER' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.nomGestorColas = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'QUEUE_LOGS' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.nomCola = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'SERVIDOR_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.servidorMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'CANAL_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.canalMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'PUERTO_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.portMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'USER_ID_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.userIdMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'PASSWORD_MQ' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.passMQ = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'IMPRIMIR_FILE_BD' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.imprimirLogToFileBD = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'DESC_ERROR' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.descError = TRIM(source.VALOR);
+			ELSEIF source.PROPIEDAD = 'DESC_EXITOSO' THEN
+				SET InputLocalEnvironment.Variables.BDLOGCONFIG.descExitoso = TRIM(source.VALOR);
+			END IF;
+		END FOR;
+
+	END;
+	
+END MODULE;
+/*
+* Recorre un arbol campo por campo, copiando los datos en un nuevo campo con el mismo nombre
+* el objetivo es quitar los namespace de todo el arbol
+*
+* Parameters:
+*
+* IN element: Estructura arbol o payload el cual será recorrido campo por campo.
+* IN datosArbol: Estructura arbol en donde se irán copiando los nuevos datos.
+*
+*/
+CREATE PROCEDURE crearArbol (IN element REFERENCE, IN datosArbol REFERENCE)
+BEGIN
+	DECLARE childs INTEGER;
+	DECLARE numNietos INTEGER;
+	DECLARE I INTEGER 1;
+
+	SET childs = CARDINALITY(element.*[]);
+	WHILE I <= childs DO
+		CREATE NEXTSIBLING OF datosArbol.[<] NAME FIELDNAME(element.[I]);
+		SET numNietos = CARDINALITY(element.*[I].*[]);
+
+		IF numNietos >= 1 THEN
+			CALL crearArbol(element.*[I], datosArbol.[<]);
+		ELSE
+			SET datosArbol.[<] = FIELDVALUE(element.[I]);
+		END IF;
+
+		SET I = I + 1;
+	END WHILE;
+END;
+
+/*
+* Construye en el Environment el payload enviado como parametro
+* creando una carpeta nueva en el arbol con el parametro nombreProveedor
+*
+* Nota:
+* Tomar en cuenta que no se debe enviar como arbolEntrada un mismo Environment
+* ya que ésto produce una referencia circular.
+*
+* Parameters:
+*
+* IN arbolEntrada: Estructura arbol o payload que será copiado al Environment.salida.
+* IN nombreProveedor: Nombre de la carpeta que se creará en el Environment.salida.
+* IN direccion: Dirección de entrada o salida del proveedor.
+* INOUT Environment: Variable Environment donde se guardará el payload enviado.
+*/
+CREATE PROCEDURE ImprimirLogs(IN arbolEntrada REFERENCE, IN nombreProveedor CHARACTER, IN direccion CHARACTER, INOUT Environment REFERENCE)
+BEGIN
+	DECLARE nomOperacion CHARACTER;
+
+	IF direccion = '' OR direccion IS NULL THEN
+		SET direccion = 'E';
+	END IF;
+
+	SET direccion = UCASE(direccion);
+
+	SET nomOperacion = direccion || '__' || nombreProveedor;
+
+	IF FIELDTYPE(Environment.Logs.mensajeConvertido.[<]) IS NULL THEN
+		SET Environment.Logs.mensajeConvertido = arbolEntrada;
+	END IF;
+
+	CREATE LASTCHILD OF Environment.Logs.Proveedor DOMAIN('XMLNSC') TYPE XMLNSC.Folder NAME nomOperacion;
+	SET Environment.Logs.Proveedor.[<].tiempo = diners.utilitarios.obtenerFecha();
+	DECLARE datosArbol REFERENCE TO Environment.Logs.Proveedor.[<];
+	CALL crearArbol(Environment.Logs.mensajeConvertido, datosArbol);
+
+	DELETE FIELD Environment.Logs.mensajeConvertido;
+END;
+
+/*
+* Invoca un método Java enviando como parametro una cadena de texto y el nombre del servicio
+* Éste método se invoca al final de la ejecución del flujo
+*
+* Parameters:
+*
+* IN texto: Cadena CHARACTER que se envía al método.
+* IN nameService: Nombre del servicio.
+*
+*/
+CREATE FUNCTION imprimirLogsJava (IN texto CHARACTER, IN nomService CHARACTER, IN port CHARACTER, IN imprimir CHARACTER)
+LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.logs.LogGenerico.imprimirLog";
+
+/*
+* Invoca un método Java enviando como parametro una cadena de texto y el nombre del servicio y el nivel Trace
+* Es método se utiliza por invocaciones JAVA en caso de querer imprimir una cadena en cada linea
+*
+* Parameters:
+*
+* IN texto: Cadena CHARACTER que se envía al método.
+* IN nameService: Nombre del servicio.
+*/
+CREATE FUNCTION imprimirLogsGenerico (IN texto CHARACTER, IN nomService CHARACTER, IN nivelTrace CHARACTER)
+LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.logs.LogGenerico.imprimirLog";
+
+/*
+* Invoca un método Java para depositar un mensaje a la cola
+*
+* Parameters:
+*
+* IN texto: Cadena CHARACTER que se envía al método.
+* IN nameService: Nombre del servicio.
+*
+*/
+CREATE FUNCTION DepositarMensajeACola (IN texto CHARACTER, INOUT obj REFERENCE)
+RETURNS CHAR
+LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.logs.LogGenerico.DepositarMensajeACola";
+
+/*
+* Invoca un método Java para cargar variables de configuración de un archivo XML
+*
+* Parameters:
+*
+* IN nameService: Cadena CHARACTER que se envía al método.
+* IN nameOper: Nombre del servicio.
+* IN obj: Árbol de referencia con los datos de respuesta
+*
+*/
+CREATE FUNCTION cargarConfiguracion (IN nameService CHARACTER, IN nameOper CHARACTER, INOUT obj REFERENCE)
+LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.logs.LogGenerico.getConfigService";
+
+/**
+*Método para consultar los parametros generales.
+*
+*/
+CREATE FUNCTION cargarConfiguracionLogParametros ( INOUT obj REFERENCE)
+LANGUAGE JAVA
+EXTERNAL NAME "ec.com.diners.logs.LogGenerico.getConfiguracionLogParametros";

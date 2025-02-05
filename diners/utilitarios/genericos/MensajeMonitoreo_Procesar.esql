@@ -1,0 +1,14 @@
+BROKER SCHEMA diners.utilitarios.genericos
+
+DECLARE Code EXTERNAL CHARACTER '';
+DECLARE Message EXTERNAL CHARACTER '';
+
+CREATE COMPUTE MODULE MensajeMonitoreo_Procesar
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot.JSON.Data.Response.Codigo = Code;
+		SET OutputRoot.JSON.Data.Response.Descripcion = Message;
+		RETURN TRUE;
+	END;
+
+END MODULE;

@@ -1,0 +1,13 @@
+BROKER SCHEMA diners.utilitarios.genericos
+
+
+CREATE COMPUTE MODULE LlamarT24_LlamarT24
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		SET OutputRoot = InputRoot;
+		SET OutputLocalEnvironment.Destination.File.Directory = Environment.FlujoT24.Path;
+		SET OutputLocalEnvironment.Destination.File.Name = Environment.FlujoT24.Method;
+		RETURN TRUE;
+	END;
+
+END MODULE;

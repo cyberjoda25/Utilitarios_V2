@@ -1,0 +1,144 @@
+BROKER SCHEMA diners.utilitarios
+
+
+CREATE COMPUTE MODULE Transformacion
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		-- CALL CopyMessageHeaders();
+		-- CALL CopyEntireMessage();
+		RETURN TRUE;
+	END;
+
+	CREATE PROCEDURE CopyMessageHeaders() BEGIN
+		DECLARE I INTEGER 1;
+		DECLARE J INTEGER;
+		SET J = CARDINALITY(InputRoot.*[]);
+		WHILE I < J DO
+			SET OutputRoot.*[I] = InputRoot.*[I];
+			SET I = I + 1;
+		END WHILE;
+	END;
+
+	CREATE PROCEDURE CopyEntireMessage() BEGIN
+		SET OutputRoot = InputRoot;
+	END;
+	
+	
+
+	
+END MODULE;
+
+	/*
+	@author: IBM - Ivan Muela
+	@Modificacion: Diners - David Albuja
+	@version1: 09/11/2016
+	Este procedimiento recibe una cadena de caracteres que contienen 
+	una fecha con el formato YYYYMMDD ejem 20160324 y lo transforma al 
+	formato DD/MMM/YYYY ejem 24/Mar/2016
+	*/
+CREATE PROCEDURE transformarFechaYMD (IN fecha CHAR) RETURNS CHAR
+BEGIN
+
+	DECLARE anio CHARACTER;
+	DECLARE mes CHARACTER;
+	DECLARE MMM CHARACTER;
+	DECLARE dia CHARACTER;
+	DECLARE transFecha CHARACTER;
+
+	SET anio = SUBSTRING(fecha FROM 1 FOR 4);
+	SET mes = SUBSTRING(fecha FROM 5 FOR 2);
+	SET dia = SUBSTRING(fecha FROM 7 FOR 2);
+
+	CASE mes
+	WHEN '01' THEN
+		SET MMM = 'Ene';
+	WHEN '02' THEN
+		SET MMM = 'Feb';
+	WHEN '03' THEN
+		SET MMM = 'Mar';
+	WHEN '04' THEN
+		SET MMM = 'Abr';
+	WHEN '05' THEN
+		SET MMM = 'May';
+	WHEN '06' THEN
+		SET MMM = 'Jun';
+	WHEN '07' THEN
+		SET MMM = 'Jul';
+	WHEN '08' THEN
+		SET MMM = 'Ago';
+	WHEN '09' THEN
+		SET MMM = 'Sep';
+	WHEN '10' THEN
+		SET MMM = 'Oct';
+	WHEN '11' THEN
+		SET MMM = 'Nov';
+	WHEN '12' THEN
+		SET MMM = 'Dic';
+	END CASE;
+
+	SET transFecha = dia || '/' || MMM || '/' || anio;	
+
+
+	RETURN transFecha;
+END;
+
+	/*
+	@author: IBM - Ivan Muela
+	@version1: 09/11/2016
+	Este procedimiento recibe una cadena de caracteres que contienen 
+	y los separa con algun patron en especial
+	*/
+CREATE PROCEDURE Tokenizador (IN Cadena CHARACTER, IN Delimitador CHARACTER, IN Env REFERENCE)
+BEGIN
+   DECLARE P INTEGER;
+   DECLARE Idx INTEGER 1;
+   SET Env.dato = NULL;
+   
+   REPEAT
+      SET P = POSITION(Delimitador IN Cadena);
+      IF P = 0 THEN
+          IF LENGTH(Cadena) > 0 THEN
+             SET Env.dato[Idx] = Cadena;
+          END IF;
+      ELSE
+         SET Env.dato[Idx] = LEFT(Cadena, P - 1);
+         SET Cadena = SUBSTRING(Cadena FROM P + LENGTH(Delimitador));
+         SET Idx = Idx + 1;
+      END IF;
+   UNTIL P = 0
+      
+   END REPEAT;   
+END;
+
+/*
+	@author: IBM - Jaime Cadena
+	@version1: 07/12/2016
+	Este procedimiento recibe dos cadena de caracteres que contienen fecha y hora 
+	y los separa con algun patron en especial
+	*/
+
+CREATE PROCEDURE transformarFechaHora (IN fecha CHAR,IN horaIn CHAR) RETURNS CHAR
+BEGIN
+
+	DECLARE anio CHARACTER;
+	DECLARE mes CHARACTER;
+	DECLARE MMM CHARACTER;
+	DECLARE dia CHARACTER;
+	DECLARE hora CHARACTER;
+	DECLARE minuto CHARACTER;
+	DECLARE segundo CHARACTER;
+	DECLARE transFecha CHARACTER;
+
+	SET anio = SUBSTRING(fecha FROM 1 FOR 4);
+	SET mes = SUBSTRING(fecha FROM 5 FOR 2);
+	SET dia = SUBSTRING(fecha FROM 7 FOR 2);
+	SET hora = SUBSTRING(horaIn FROM 1 FOR 2);
+	SET minuto = SUBSTRING(horaIn FROM 3 FOR 2);
+	SET segundo = SUBSTRING(horaIn FROM 5 FOR 2);
+	
+
+	SET transFecha = anio || '-' || mes || '-' || dia || 'T' || hora || ':' || minuto || ':' || segundo;	
+
+
+	RETURN transFecha;
+END;

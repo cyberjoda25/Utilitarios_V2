@@ -1,0 +1,26 @@
+BROKER SCHEMA diners.utilitarios.genericos
+
+
+CREATE COMPUTE MODULE LlamarAs400V2_Compute2
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		DECLARE espacio CHAR CAST(X'0A' AS CHAR CCSID 1208);
+		DECLARE responseAs400 REFERENCE TO InputRoot.JSON.Data.MessageOut;
+			DECLARE valor CHARACTER;
+			IF responseAs400.codError = '0' THEN
+				CREATE LASTCHILD OF Environment.FlujosAs400.Salida Name FIELDNAME(responseAs400.[>]);
+				SET valor = FIELDNAME(responseAs400.[>]);
+				
+				SET Environment.FlujosAs400.Salida.[<] = responseAs400.[>];
+			END IF;
+			
+			SET Environment.FlujosAs400.Salida.codError = responseAs400.codError;
+			SET Environment.FlujosAs400.Salida.descError = REPLACE(responseAs400.descError, espacio, '&#10;');
+			
+			/*Método para imprimir logs*/
+		
+
+		RETURN TRUE;
+	END;
+
+END MODULE;
